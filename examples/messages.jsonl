@@ -1,0 +1,72 @@
+# Example IEC-104 bridge input messages
+#
+# Format: one JSON object per line.  Blank lines and lines starting with '#'
+# are ignored.
+#
+# Each message maps to a lib60870 ASDU type as follows:
+#   "type": "single_point"  → M_SP_NA_1 (type  1) – decoded by simple_client.c
+#   "type": "float"         → M_ME_NC_1 (type 13) – type name printed only
+#   "type": "scaled"        → M_ME_NB_1 (type 11) – type name printed only
+#   (omitted)               → inferred: bool→single_point, int→scaled, float→float
+#
+# The C example client (simple_client) will decode M_SP_NA_1 values in full
+# and print the TypeID name for other types.  All values are replayed when
+# a General Interrogation is received from the client.
+#
+# Adjust the "ca" fields to match your IEC104_CA setting (default: 1).
+
+# ── Single-point information (M_SP_NA_1) ──────────────────────────────────────
+# These are decoded by simple_client.c with IOA + value (0 = OFF, 1 = ON).
+
+# Circuit breakers (IOA 1001–1004)
+{"ioa": 1001, "value": true,  "type": "single_point", "ca": 1, "quality": "good", "cot": "spontaneous"}
+{"ioa": 1002, "value": false, "type": "single_point", "ca": 1, "quality": "good", "cot": "spontaneous"}
+{"ioa": 1003, "value": true,  "type": "single_point", "ca": 1, "quality": "good", "cot": "spontaneous"}
+{"ioa": 1004, "value": false, "type": "single_point", "ca": 1, "quality": "good", "cot": "spontaneous"}
+
+# Protection relay status (IOA 1101–1103)
+{"ioa": 1101, "value": false, "type": "single_point", "ca": 1, "quality": "good",      "cot": "spontaneous"}
+{"ioa": 1102, "value": true,  "type": "single_point", "ca": 1, "quality": "not_topical","cot": "spontaneous"}
+{"ioa": 1103, "value": false, "type": "single_point", "ca": 1, "quality": "substituted","cot": "spontaneous"}
+
+# ── Float measurements (M_ME_NC_1) ────────────────────────────────────────────
+# simple_client.c will print the TypeID and element count but not the value.
+
+# Voltages in kV (IOA 2001–2003)
+{"ioa": 2001, "value": 132.4,  "type": "float", "ca": 1, "quality": "good", "cot": "spontaneous"}
+{"ioa": 2002, "value": 131.9,  "type": "float", "ca": 1, "quality": "good", "cot": "spontaneous"}
+{"ioa": 2003, "value": 33.05,  "type": "float", "ca": 1, "quality": "good", "cot": "spontaneous"}
+
+# Frequency (IOA 2100)
+{"ioa": 2100, "value": 49.97, "type": "float", "ca": 1, "quality": "good", "cot": "periodic"}
+
+# Temperature sensors in °C (IOA 2201–2202)
+{"ioa": 2201, "value": 72.3, "type": "float", "ca": 1, "quality": "good", "cot": "spontaneous"}
+{"ioa": 2202, "value": 68.1, "type": "float", "ca": 1, "quality": "good", "cot": "spontaneous"}
+
+# Invalid reading (sensor fault)
+{"ioa": 2203, "value": -999.0, "type": "float", "ca": 1, "quality": "invalid", "cot": "spontaneous"}
+
+# ── Scaled measurements (M_ME_NB_1) ──────────────────────────────────────────
+# simple_client.c will print the TypeID and element count but not the value.
+# Values are signed 16-bit integers (range -32768 … 32767).
+
+# Active power in MW × 10  (IOA 3001–3002)
+{"ioa": 3001, "value": 3450, "type": "scaled", "ca": 1, "quality": "good", "cot": "spontaneous"}
+{"ioa": 3002, "value": -820, "type": "scaled", "ca": 1, "quality": "good", "cot": "spontaneous"}
+
+# Reactive power in Mvar × 10 (IOA 3101)
+{"ioa": 3101, "value": 1200, "type": "scaled", "ca": 1, "quality": "good", "cot": "spontaneous"}
+
+# Current in A (IOA 3201–3202)
+{"ioa": 3201, "value": 520,  "type": "scaled", "ca": 1, "quality": "good", "cot": "spontaneous"}
+{"ioa": 3202, "value": 515,  "type": "scaled", "ca": 1, "quality": "good", "cot": "spontaneous"}
+
+# ── Type inference (no explicit "type" field) ─────────────────────────────────
+# bool   → single_point (M_SP_NA_1)
+# int    → scaled       (M_ME_NB_1)
+# float  → float        (M_ME_NC_1)
+
+{"ioa": 4001, "value": true}
+{"ioa": 4002, "value": 42}
+{"ioa": 4003, "value": 3.14}
