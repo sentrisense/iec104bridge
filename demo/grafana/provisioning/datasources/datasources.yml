@@ -1,0 +1,21 @@
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB
+    type: influxdb
+    uid: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    jsonData:
+      version: Flux
+      organization: demo
+      defaultBucket: iec104
+    secureJsonData:
+      token: demo-token
+    isDefault: true
+
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090

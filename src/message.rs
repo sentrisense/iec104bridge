@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2024 Sentrisense
+//
 //! JSON message schema consumed from the NATS JetStream.
 //!
 //! Every message on the stream must be valid JSON that can be deserialised

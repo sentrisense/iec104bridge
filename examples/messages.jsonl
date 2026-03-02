@@ -1,72 +1,65 @@
-# Example IEC-104 bridge input messages
+# Example IEC-104 bridge input messages – DLR (Dynamic Line Rating) demo
 #
 # Format: one JSON object per line.  Blank lines and lines starting with '#'
 # are ignored.
 #
-# Each message maps to a lib60870 ASDU type as follows:
-#   "type": "single_point"  → M_SP_NA_1 (type  1) – decoded by simple_client.c
-#   "type": "float"         → M_ME_NC_1 (type 13) – type name printed only
-#   "type": "scaled"        → M_ME_NB_1 (type 11) – type name printed only
-#   (omitted)               → inferred: bool→single_point, int→scaled, float→float
+# IOA addressing scheme (matches the NATS publisher and scraper):
+#   CA  = power line number (1 or 2)
+#   IOA 1001–1010  → span 1–10 conductor temperature  (M_ME_NC_1, float, °C)
+#   IOA 2001–2010  → span 1–10 ampacity               (M_ME_NB_1, scaled, A)
+#   IOA 3001       → line ampacity = min of valid span ampacities (M_ME_NB_1, A)
 #
-# The C example client (simple_client) will decode M_SP_NA_1 values in full
-# and print the TypeID name for other types.  All values are replayed when
-# a General Interrogation is received from the client.
-#
-# Adjust the "ca" fields to match your IEC104_CA setting (default: 1).
+# Quality states: good | not_topical | substituted | blocked | overflow | invalid
+# Spans 9 & 10 carry degraded quality to exercise the state-timeline panels.
 
-# ── Single-point information (M_SP_NA_1) ──────────────────────────────────────
-# These are decoded by simple_client.c with IOA + value (0 = OFF, 1 = ON).
+# ── Power Line 1 (CA=1) ───────────────────────────────────────────────────────
+# Span temperatures (M_ME_NC_1)
+{"ca": 1, "ioa": 1001, "type": "float", "value": 67.43, "quality": "good"}
+{"ca": 1, "ioa": 1002, "type": "float", "value": 65.81, "quality": "good"}
+{"ca": 1, "ioa": 1003, "type": "float", "value": 68.12, "quality": "good"}
+{"ca": 1, "ioa": 1004, "type": "float", "value": 66.55, "quality": "good"}
+{"ca": 1, "ioa": 1005, "type": "float", "value": 67.03, "quality": "good"}
+{"ca": 1, "ioa": 1006, "type": "float", "value": 64.78, "quality": "good"}
+{"ca": 1, "ioa": 1007, "type": "float", "value": 66.99, "quality": "good"}
+{"ca": 1, "ioa": 1008, "type": "float", "value": 65.44, "quality": "good"}
+{"ca": 1, "ioa": 1009, "type": "float", "value": 67.20, "quality": "not_topical"}
+{"ca": 1, "ioa": 1010, "type": "float", "value": 66.01, "quality": "invalid"}
+# Span ampacities (M_ME_NB_1)
+{"ca": 1, "ioa": 2001, "type": "scaled", "value": 503, "quality": "good"}
+{"ca": 1, "ioa": 2002, "type": "scaled", "value": 517, "quality": "good"}
+{"ca": 1, "ioa": 2003, "type": "scaled", "value": 498, "quality": "good"}
+{"ca": 1, "ioa": 2004, "type": "scaled", "value": 511, "quality": "good"}
+{"ca": 1, "ioa": 2005, "type": "scaled", "value": 506, "quality": "good"}
+{"ca": 1, "ioa": 2006, "type": "scaled", "value": 522, "quality": "good"}
+{"ca": 1, "ioa": 2007, "type": "scaled", "value": 507, "quality": "good"}
+{"ca": 1, "ioa": 2008, "type": "scaled", "value": 515, "quality": "good"}
+{"ca": 1, "ioa": 2009, "type": "scaled", "value": 505, "quality": "not_topical"}
+{"ca": 1, "ioa": 2010, "type": "scaled", "value": 509, "quality": "invalid"}
+# Line ampacity = min of valid spans (span 3 @ 498 A)
+{"ca": 1, "ioa": 3001, "type": "scaled", "value": 498, "quality": "good"}
 
-# Circuit breakers (IOA 1001–1004)
-{"ioa": 1001, "value": true,  "type": "single_point", "ca": 1, "quality": "good", "cot": "spontaneous"}
-{"ioa": 1002, "value": false, "type": "single_point", "ca": 1, "quality": "good", "cot": "spontaneous"}
-{"ioa": 1003, "value": true,  "type": "single_point", "ca": 1, "quality": "good", "cot": "spontaneous"}
-{"ioa": 1004, "value": false, "type": "single_point", "ca": 1, "quality": "good", "cot": "spontaneous"}
-
-# Protection relay status (IOA 1101–1103)
-{"ioa": 1101, "value": false, "type": "single_point", "ca": 1, "quality": "good",      "cot": "spontaneous"}
-{"ioa": 1102, "value": true,  "type": "single_point", "ca": 1, "quality": "not_topical","cot": "spontaneous"}
-{"ioa": 1103, "value": false, "type": "single_point", "ca": 1, "quality": "substituted","cot": "spontaneous"}
-
-# ── Float measurements (M_ME_NC_1) ────────────────────────────────────────────
-# simple_client.c will print the TypeID and element count but not the value.
-
-# Voltages in kV (IOA 2001–2003)
-{"ioa": 2001, "value": 132.4,  "type": "float", "ca": 1, "quality": "good", "cot": "spontaneous"}
-{"ioa": 2002, "value": 131.9,  "type": "float", "ca": 1, "quality": "good", "cot": "spontaneous"}
-{"ioa": 2003, "value": 33.05,  "type": "float", "ca": 1, "quality": "good", "cot": "spontaneous"}
-
-# Frequency (IOA 2100)
-{"ioa": 2100, "value": 49.97, "type": "float", "ca": 1, "quality": "good", "cot": "periodic"}
-
-# Temperature sensors in °C (IOA 2201–2202)
-{"ioa": 2201, "value": 72.3, "type": "float", "ca": 1, "quality": "good", "cot": "spontaneous"}
-{"ioa": 2202, "value": 68.1, "type": "float", "ca": 1, "quality": "good", "cot": "spontaneous"}
-
-# Invalid reading (sensor fault)
-{"ioa": 2203, "value": -999.0, "type": "float", "ca": 1, "quality": "invalid", "cot": "spontaneous"}
-
-# ── Scaled measurements (M_ME_NB_1) ──────────────────────────────────────────
-# simple_client.c will print the TypeID and element count but not the value.
-# Values are signed 16-bit integers (range -32768 … 32767).
-
-# Active power in MW × 10  (IOA 3001–3002)
-{"ioa": 3001, "value": 3450, "type": "scaled", "ca": 1, "quality": "good", "cot": "spontaneous"}
-{"ioa": 3002, "value": -820, "type": "scaled", "ca": 1, "quality": "good", "cot": "spontaneous"}
-
-# Reactive power in Mvar × 10 (IOA 3101)
-{"ioa": 3101, "value": 1200, "type": "scaled", "ca": 1, "quality": "good", "cot": "spontaneous"}
-
-# Current in A (IOA 3201–3202)
-{"ioa": 3201, "value": 520,  "type": "scaled", "ca": 1, "quality": "good", "cot": "spontaneous"}
-{"ioa": 3202, "value": 515,  "type": "scaled", "ca": 1, "quality": "good", "cot": "spontaneous"}
-
-# ── Type inference (no explicit "type" field) ─────────────────────────────────
-# bool   → single_point (M_SP_NA_1)
-# int    → scaled       (M_ME_NB_1)
-# float  → float        (M_ME_NC_1)
-
-{"ioa": 4001, "value": true}
-{"ioa": 4002, "value": 42}
-{"ioa": 4003, "value": 3.14}
+# ── Power Line 2 (CA=2) ───────────────────────────────────────────────────────
+# Span temperatures (M_ME_NC_1)
+{"ca": 2, "ioa": 1001, "type": "float", "value": 75.62, "quality": "good"}
+{"ca": 2, "ioa": 1002, "type": "float", "value": 73.88, "quality": "good"}
+{"ca": 2, "ioa": 1003, "type": "float", "value": 76.45, "quality": "good"}
+{"ca": 2, "ioa": 1004, "type": "float", "value": 74.11, "quality": "good"}
+{"ca": 2, "ioa": 1005, "type": "float", "value": 75.03, "quality": "good"}
+{"ca": 2, "ioa": 1006, "type": "float", "value": 73.30, "quality": "good"}
+{"ca": 2, "ioa": 1007, "type": "float", "value": 74.87, "quality": "good"}
+{"ca": 2, "ioa": 1008, "type": "float", "value": 74.55, "quality": "good"}
+{"ca": 2, "ioa": 1009, "type": "float", "value": 75.19, "quality": "not_topical"}
+{"ca": 2, "ioa": 1010, "type": "float", "value": 74.72, "quality": "invalid"}
+# Span ampacities (M_ME_NB_1)
+{"ca": 2, "ioa": 2001, "type": "scaled", "value": 463, "quality": "good"}
+{"ca": 2, "ioa": 2002, "type": "scaled", "value": 471, "quality": "good"}
+{"ca": 2, "ioa": 2003, "type": "scaled", "value": 458, "quality": "good"}
+{"ca": 2, "ioa": 2004, "type": "scaled", "value": 469, "quality": "good"}
+{"ca": 2, "ioa": 2005, "type": "scaled", "value": 464, "quality": "good"}
+{"ca": 2, "ioa": 2006, "type": "scaled", "value": 477, "quality": "good"}
+{"ca": 2, "ioa": 2007, "type": "scaled", "value": 465, "quality": "good"}
+{"ca": 2, "ioa": 2008, "type": "scaled", "value": 467, "quality": "good"}
+{"ca": 2, "ioa": 2009, "type": "scaled", "value": 462, "quality": "not_topical"}
+{"ca": 2, "ioa": 2010, "type": "scaled", "value": 461, "quality": "invalid"}
+# Line ampacity = min of valid spans (span 3 @ 458 A)
+{"ca": 2, "ioa": 3001, "type": "scaled", "value": 458, "quality": "good"}

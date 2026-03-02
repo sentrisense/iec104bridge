@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2024 Sentrisense
+//
 //! Abstractions over the incoming message stream.
 //!
 //! [`MessageSource`] is the central trait: any type that implements it can be
@@ -10,15 +13,15 @@
 //! | Type | Description |
 //! |---|---|
 //! | [`NatsSource`] | Production source – JetStream pull consumer |
-//! | [`FileSource`] | File source – reads one JSON object per line |
 //! | [`IterSource`] | In-memory source – wraps a `Vec<Iec104Message>` |
 //!
 //! # Extending
 //!
 //! Implement [`MessageSource`] on your type and return a
-//! `BoxStream<'static, anyhow::Result<Iec104Message>>`.  A Unix-socket source
-//! would, for example, accept connections, read newline-delimited JSON, and
-//! yield parsed [`Iec104Message`] values through the stream.
+//! `BoxStream<'static, anyhow::Result<Iec104Message>>`.  A Unix-socket or
+//! TCP-stream source would, for example, accept connections, read
+//! newline-delimited JSON, and yield parsed [`Iec104Message`] values through
+//! the stream.
 
 use futures::stream::BoxStream;
 use futures::StreamExt as _;
@@ -69,7 +72,11 @@ impl NatsSource {
     pub async fn from_config(config: &Config) -> anyhow::Result<Self> {
         info!(url = %config.nats_url, "Connecting to NATS");
 
-        let client = async_nats::connect(&config.nats_url)
+        // async_nats::connect expects a single URL or a *slice* of URL strings.
+        // A comma-separated string (common in docker-compose env vars) must be
+        // split before being passed; passing the raw string causes a parse error.
+        let urls: Vec<&str> = config.nats_url.split(',').map(str::trim).collect();
+        let client = async_nats::connect(urls.as_slice())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect to NATS at {}: {e}", config.nats_url))?;
 
@@ -157,86 +164,18 @@ impl MessageSource for NatsSource {
     }
 }
 
-// ─── FileSource ───────────────────────────────────────────────────────────────
-
-/// Reads a newline-delimited JSON file and yields one [`Iec104Message`] per
-/// non-blank, non-comment line.
-///
-/// Lines starting with `#` (after trimming whitespace) are treated as comments
-/// and skipped.  Parse errors are surfaced as `Err` items so the caller can
-/// decide whether to abort or continue.
-///
-/// Primarily intended for integration testing and manual replay scenarios, but
-/// can also be used in production to replay a saved message log.
-pub struct FileSource {
-    path: std::path::PathBuf,
-}
-
-impl FileSource {
-    /// Create a source that will read from `path` when
-    /// [`into_messages`](MessageSource::into_messages) is called.
-    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
-}
-
-impl MessageSource for FileSource {
-    fn into_messages(self: Box<Self>) -> BoxStream<'static, anyhow::Result<Iec104Message>> {
-        let path = self.path;
-
-        // Read the file asynchronously, then convert it into a stream of
-        // results.  We load the whole file upfront; for test/replay files this
-        // is fine (they are not expected to be large).
-        let fut = async move {
-            let content = tokio::fs::read_to_string(&path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Cannot open {:?}: {e}", path))?;
-
-            let items: Vec<anyhow::Result<Iec104Message>> = content
-                .lines()
-                .filter(|l| {
-                    let t = l.trim();
-                    !t.is_empty() && !t.starts_with('#')
-                })
-                .map(|l| {
-                    serde_json::from_str(l.trim())
-                        .map_err(|e| anyhow::anyhow!("JSON parse error on line {:?}: {e}", l.trim()))
-                })
-                .collect();
-
-            Ok::<_, anyhow::Error>(items)
-        };
-
-        // Flatten: one future → one batch of items → stream of items.
-        Box::pin(
-            futures::stream::once(fut).flat_map(|result| {
-                let items = match result {
-                    Err(e) => vec![Err(e)],
-                    Ok(items) => items,
-                };
-                futures::stream::iter(items)
-            }),
-        )
-    }
-}
-
 // ─── IterSource ───────────────────────────────────────────────────────────────
 
 /// An in-memory source backed by a pre-built `Vec<Iec104Message>`.
 ///
 /// Intended for unit and integration tests where you want to drive the bridge
 /// logic with known data without touching the filesystem or a message broker.
-///
-/// ```rust
-/// # use iec104bridge::source::IterSource;
-/// # use iec104bridge::message::{Iec104Message, DataValue, QualityField, CotField};
-/// let msgs = vec![/* … */];
-/// let source = IterSource::new(msgs);
-/// ```
+#[cfg(test)]
 pub struct IterSource {
     messages: Vec<Iec104Message>,
 }
 
+#[cfg(test)]
 impl IterSource {
     /// Create a source that will yield exactly the messages in `messages`,
     /// in order, then end.
@@ -245,6 +184,7 @@ impl IterSource {
     }
 }
 
+#[cfg(test)]
 impl MessageSource for IterSource {
     fn into_messages(self: Box<Self>) -> BoxStream<'static, anyhow::Result<Iec104Message>> {
         Box::pin(futures::stream::iter(
@@ -260,7 +200,7 @@ mod tests {
     use futures::StreamExt as _;
 
     use super::*;
-    use crate::message::{CotField, DataType, DataValue, QualityField};
+    use crate::message::{CotField, DataValue, DataType, QualityField};
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -273,20 +213,6 @@ mod tests {
             quality: QualityField::Good,
             cot: CotField::Spontaneous,
         }
-    }
-
-    /// Write `content` to a unique temp file and return its path.
-    /// The caller is responsible for deleting it (ignored in tests for simplicity).
-    async fn write_temp(content: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "iec104bridge_test_{}.jsonl",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        ));
-        tokio::fs::write(&path, content).await.unwrap();
-        path
     }
 
     // ── IterSource ────────────────────────────────────────────────────────────
@@ -311,109 +237,4 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // ── FileSource ────────────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn file_source_parses_valid_lines() {
-        let content = r#"{"ioa": 10, "value": 1.0}
-{"ioa": 20, "value": 2.0}
-{"ioa": 30, "value": true}
-"#;
-        let path = write_temp(content).await;
-        let source: Box<dyn MessageSource> = Box::new(FileSource::new(&path));
-        let results: Vec<_> = source.into_messages().collect().await;
-        let _ = tokio::fs::remove_file(&path).await;
-
-        assert_eq!(results.len(), 3);
-        assert!(results.iter().all(|r| r.is_ok()));
-        assert_eq!(results[0].as_ref().unwrap().ioa, 10);
-        assert_eq!(results[1].as_ref().unwrap().ioa, 20);
-        assert_eq!(results[2].as_ref().unwrap().ioa, 30);
-    }
-
-    #[tokio::test]
-    async fn file_source_skips_blank_lines() {
-        let content = "\n\n{\"ioa\": 1, \"value\": 0.0}\n\n";
-        let path = write_temp(content).await;
-        let source: Box<dyn MessageSource> = Box::new(FileSource::new(&path));
-        let results: Vec<_> = source.into_messages().collect().await;
-        let _ = tokio::fs::remove_file(&path).await;
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].as_ref().unwrap().ioa, 1);
-    }
-
-    #[tokio::test]
-    async fn file_source_skips_comment_lines() {
-        let content = "# this is a header comment\n{\"ioa\": 5, \"value\": 9.9}\n# another comment\n";
-        let path = write_temp(content).await;
-        let source: Box<dyn MessageSource> = Box::new(FileSource::new(&path));
-        let results: Vec<_> = source.into_messages().collect().await;
-        let _ = tokio::fs::remove_file(&path).await;
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].as_ref().unwrap().ioa, 5);
-    }
-
-    #[tokio::test]
-    async fn file_source_yields_error_for_invalid_json() {
-        let content = "not json at all\n{\"ioa\": 7, \"value\": 0.0}\n";
-        let path = write_temp(content).await;
-        let source: Box<dyn MessageSource> = Box::new(FileSource::new(&path));
-        let results: Vec<_> = source.into_messages().collect().await;
-        let _ = tokio::fs::remove_file(&path).await;
-
-        assert_eq!(results.len(), 2);
-        assert!(results[0].is_err());
-        assert!(results[1].is_ok());
-        assert_eq!(results[1].as_ref().unwrap().ioa, 7);
-    }
-
-    #[tokio::test]
-    async fn file_source_error_for_missing_file() {
-        let path = std::path::PathBuf::from("/nonexistent/path/to/file.jsonl");
-        let source: Box<dyn MessageSource> = Box::new(FileSource::new(&path));
-        let results: Vec<_> = source.into_messages().collect().await;
-
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_err());
-    }
-
-    #[tokio::test]
-    async fn file_source_empty_file_yields_nothing() {
-        let path = write_temp("").await;
-        let source: Box<dyn MessageSource> = Box::new(FileSource::new(&path));
-        let results: Vec<_> = source.into_messages().collect().await;
-        let _ = tokio::fs::remove_file(&path).await;
-
-        assert!(results.is_empty());
-    }
-
-    #[tokio::test]
-    async fn file_source_only_comments_yields_nothing() {
-        let content = "# comment 1\n  # comment 2\n";
-        let path = write_temp(content).await;
-        let source: Box<dyn MessageSource> = Box::new(FileSource::new(&path));
-        let results: Vec<_> = source.into_messages().collect().await;
-        let _ = tokio::fs::remove_file(&path).await;
-
-        assert!(results.is_empty());
-    }
-
-    #[tokio::test]
-    async fn file_source_full_message_schema() {
-        let content = r#"{"ioa": 100, "value": 42.5, "type": "float", "ca": 3, "quality": "good", "cot": "periodic"}
-"#;
-        let path = write_temp(content).await;
-        let source: Box<dyn MessageSource> = Box::new(FileSource::new(&path));
-        let results: Vec<_> = source.into_messages().collect().await;
-        let _ = tokio::fs::remove_file(&path).await;
-
-        assert_eq!(results.len(), 1);
-        let msg = results[0].as_ref().unwrap();
-        assert_eq!(msg.ioa, 100);
-        assert_eq!(msg.ca, Some(3));
-        assert_eq!(msg.cot, CotField::Periodic);
-        assert_eq!(msg.data_type, Some(DataType::Float));
-    }
 }

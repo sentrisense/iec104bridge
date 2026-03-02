@@ -1,0 +1,9 @@
+apiVersion: 1
+
+providers:
+  - name: IEC-104 Demo
+    folder: IEC-104
+    type: file
+    disableDeletion: false
+    options:
+      path: /etc/grafana/dashboards

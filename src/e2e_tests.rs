@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2024 Sentrisense
+//
 //! End-to-end tests that exercise the full pipeline:
 //!
 //! **JSON string → `serde_json` parse → `IterSource` stream → `dispatch` → `CapturingSink`**

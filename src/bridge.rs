@@ -1,4 +1,6 @@
-//! Converts [`Iec104Message`] values into lib60870 Server calls.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2024 Sentrisense
+////! Converts [`Iec104Message`] values into lib60870 Server calls.
 //!
 //! The main entry-point is [`dispatch`], which is generic over any [`DataSink`]
 //! so that mock sinks can be used in unit tests without spinning up a real

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2024 Sentrisense
+//
 //! Configuration loaded from environment variables.
 //!
 //! All settings have sensible defaults so only the NATS stream/consumer names
@@ -27,13 +30,12 @@ pub struct Config {
     /// message (default: `1`)
     pub iec104_default_ca: u16,
 
-    // ── Input source ──────────────────────────────────────────────────────────
-    /// Path to a newline-delimited JSON file to replay instead of connecting to
-    /// NATS.  When set the bridge reads all messages from the file and then
-    /// stops; useful for local testing and log replay.
+
+    // ── Observability ─────────────────────────────────────────────────────────
+    /// TCP port for the Prometheus metrics HTTP endpoint (default: `9091`).
     ///
-    /// Set via the `INPUT_FILE` environment variable.
-    pub input_file: Option<String>,
+    /// Set via the `METRICS_PORT` environment variable.
+    pub metrics_port: u16,
 }
 
 impl Config {
@@ -60,21 +62,10 @@ impl Config {
     where
         F: Fn(&str) -> Option<String>,
     {
-        // INPUT_FILE is checked first so NATS settings can be skipped in file mode.
-        let input_file = get("INPUT_FILE");
-
-        let nats_stream = if input_file.is_some() {
-            get("NATS_STREAM").unwrap_or_default()
-        } else {
-            get("NATS_STREAM")
-                .ok_or_else(|| anyhow::anyhow!("NATS_STREAM must be set (or set INPUT_FILE for file mode)"))?
-        };
-        let nats_consumer = if input_file.is_some() {
-            get("NATS_CONSUMER").unwrap_or_default()
-        } else {
-            get("NATS_CONSUMER")
-                .ok_or_else(|| anyhow::anyhow!("NATS_CONSUMER must be set (or set INPUT_FILE for file mode)"))?
-        };
+        let nats_stream = get("NATS_STREAM")
+            .ok_or_else(|| anyhow::anyhow!("NATS_STREAM must be set"))?;
+        let nats_consumer = get("NATS_CONSUMER")
+            .ok_or_else(|| anyhow::anyhow!("NATS_CONSUMER must be set"))?;
 
         let nats_url = get("NATS_URL").unwrap_or_else(|| "nats://localhost:4222".into());
         let nats_subject_filter = get("NATS_SUBJECT_FILTER");
@@ -90,6 +81,11 @@ impl Config {
             .parse::<u16>()
             .map_err(|_| anyhow::anyhow!("IEC104_CA must be a valid u16"))?;
 
+        let metrics_port = get("METRICS_PORT")
+            .unwrap_or_else(|| "9091".into())
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("METRICS_PORT must be a valid u16"))?;
+
         Ok(Self {
             nats_url,
             nats_stream,
@@ -98,7 +94,7 @@ impl Config {
             iec104_bind_addr,
             iec104_port,
             iec104_default_ca,
-            input_file,
+            metrics_port,
         })
     }
 }
@@ -136,28 +132,6 @@ mod tests {
         let mut map = required();
         map.remove("NATS_CONSUMER");
         assert!(from_map(&map).is_err());
-    }
-
-    #[test]
-    fn input_file_mode_does_not_require_nats_settings() {
-        // When INPUT_FILE is set, NATS_STREAM and NATS_CONSUMER are optional.
-        let mut map = HashMap::new();
-        map.insert("INPUT_FILE", "/tmp/messages.jsonl");
-        assert!(from_map(&map).is_ok());
-    }
-
-    #[test]
-    fn input_file_default_is_none() {
-        let cfg = from_map(&required()).unwrap();
-        assert_eq!(cfg.input_file, None);
-    }
-
-    #[test]
-    fn input_file_set() {
-        let mut map = required();
-        map.insert("INPUT_FILE", "/tmp/replay.jsonl");
-        let cfg = from_map(&map).unwrap();
-        assert_eq!(cfg.input_file, Some("/tmp/replay.jsonl".into()));
     }
 
     // ── defaults ──────────────────────────────────────────────────────────────

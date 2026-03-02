@@ -1,0 +1,22 @@
+# Exclude the Rust build artefacts from the build context.
+# cargo-chef handles caching inside Docker; we do not want host build
+# artefacts to leak into the context and bust the layer cache.
+target/
+
+# Git metadata
+.git/
+.gitignore
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Nix flake lock / devshell output
+result
+result-*
+.direnv/
+
+# Docker demo directory (not needed inside the bridge image)
+demo/

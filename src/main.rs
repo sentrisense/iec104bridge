@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2024 Sentrisense
+//
 //! IEC-104 bridge – subscribes to a message source and forwards JSON messages
 //! to connected IEC-104 clients as spontaneous data.
 //!
@@ -41,16 +44,27 @@ mod source;
 mod e2e_tests;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
 use lib60870::server::ServerBuilder;
 use lib60870::types::QOI_STATION;
+use tokio::io::AsyncWriteExt as _;
+use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
 use config::Config;
 use message::Iec104Message;
-use source::{FileSource, MessageSource, NatsSource};
+use source::{MessageSource, NatsSource};
+
+// ─── Shared metrics ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Default)]
+pub struct Metrics {
+    pub messages_dispatched: AtomicU64,
+    pub gi_responses:        AtomicU64,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -66,16 +80,19 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
 
     info!(
-        source      = if config.input_file.is_some() { "file" } else { "nats" },
-        nats_url    = %config.nats_url,
-        stream      = %config.nats_stream,
-        consumer    = %config.nats_consumer,
-        filter      = ?config.nats_subject_filter,
-        input_file  = ?config.input_file,
-        iec104_port = config.iec104_port,
-        iec104_ca   = config.iec104_default_ca,
+        source       = "nats",
+        nats_url     = %config.nats_url,
+        stream       = %config.nats_stream,
+        consumer     = %config.nats_consumer,
+        filter       = ?config.nats_subject_filter,
+        iec104_port  = config.iec104_port,
+        iec104_ca    = config.iec104_default_ca,
+        metrics_port = config.metrics_port,
         "Starting IEC-104 bridge"
     );
+
+    // ── Prometheus metrics ────────────────────────────────────────────────────
+    let metrics: Arc<Metrics> = Arc::new(Metrics::default());
 
     // ── IEC-104 data cache ────────────────────────────────────────────────────
     // Stores the most-recent value for each (ca, ioa) pair so that general
@@ -109,9 +126,10 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(Mutex::new(None));
 
     {
-        let slot_clone  = Arc::clone(&server_slot);
-        let store_clone = Arc::clone(&data_store);
-        let default_ca  = config.iec104_default_ca;
+        let slot_clone    = Arc::clone(&server_slot);
+        let store_clone   = Arc::clone(&data_store);
+        let metrics_clone = Arc::clone(&metrics);
+        let default_ca    = config.iec104_default_ca;
 
         iec_server.set_interrogation_handler(move |conn: &lib60870::MasterConnection, asdu: lib60870::Asdu, qoi: u8| {
             info!(qoi, "Received station interrogation");
@@ -132,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
+            metrics_clone.gi_responses.fetch_add(1, Ordering::Relaxed);
             conn.send_act_term(&asdu);
             true
         });
@@ -144,19 +163,52 @@ async fn main() -> anyhow::Result<()> {
     let server: Arc<Mutex<lib60870::Server>> = Arc::new(Mutex::new(iec_server));
     *server_slot.lock().unwrap() = Some(Arc::clone(&server));
 
-    // ── Message source ────────────────────────────────────────────────────────
-    // Select the input source based on configuration:
-    //   INPUT_FILE set  → replay a newline-delimited JSON file (FileSource)
-    //   otherwise       → pull from NATS JetStream (NatsSource)
-    // Any type implementing MessageSource can be substituted here.
-    let source: Box<dyn MessageSource> = if let Some(ref path) = config.input_file {
-        info!(path = %path, "Using file source (INPUT_FILE mode)");
-        Box::new(FileSource::new(path))
-    } else {
-        Box::new(NatsSource::from_config(&config).await?)
-    };
+    // ── Prometheus metrics HTTP server ────────────────────────────────────────
+    {
+        let metrics_clone    = Arc::clone(&metrics);
+        let data_store_clone = Arc::clone(&data_store);
+        let metrics_port     = config.metrics_port;
 
-    run_message_loop(source, server, data_store, config.iec104_default_ca).await;
+        tokio::spawn(async move {
+            let addr = format!("0.0.0.0:{metrics_port}");
+            let listener = match TcpListener::bind(&addr).await {
+                Ok(l)  => { info!(port = metrics_port, "Metrics endpoint listening"); l }
+                Err(e) => { error!(error = %e, "Failed to bind metrics port"); return; }
+            };
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { continue };
+                let metrics_ref    = Arc::clone(&metrics_clone);
+                let data_store_ref = Arc::clone(&data_store_clone);
+                tokio::spawn(async move {
+                    let cache_size      = data_store_ref.lock().unwrap().len() as u64;
+                    let msgs_dispatched = metrics_ref.messages_dispatched.load(Ordering::Relaxed);
+                    let gi_responses    = metrics_ref.gi_responses.load(Ordering::Relaxed);
+
+                    let body = format!(
+                        "# HELP iec104bridge_cache_size Number of data points currently cached\n\
+                         # TYPE iec104bridge_cache_size gauge\n\
+                         iec104bridge_cache_size {cache_size}\n\
+                         # HELP iec104bridge_messages_dispatched_total Total IEC-104 messages dispatched\n\
+                         # TYPE iec104bridge_messages_dispatched_total counter\n\
+                         iec104bridge_messages_dispatched_total {msgs_dispatched}\n\
+                         # HELP iec104bridge_gi_responses_total Total General Interrogation responses\n\
+                         # TYPE iec104bridge_gi_responses_total counter\n\
+                         iec104bridge_gi_responses_total {gi_responses}\n"
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+    }
+
+    // ── Message source ────────────────────────────────────────────────────────
+    let source: Box<dyn MessageSource> = Box::new(NatsSource::from_config(&config).await?);
+
+    run_message_loop(source, server, data_store, Arc::clone(&metrics), config.iec104_default_ca).await;
 
     info!("Bridge stopped");
     Ok(())
@@ -170,6 +222,7 @@ pub async fn run_message_loop(
     source: Box<dyn MessageSource>,
     server: Arc<Mutex<lib60870::Server>>,
     data_store: Arc<Mutex<HashMap<(u16, u32), Iec104Message>>>,
+    metrics: Arc<Metrics>,
     default_ca: u16,
 ) {
     let mut messages = source.into_messages();
@@ -214,6 +267,8 @@ pub async fn run_message_loop(
                             let srv = server.lock().unwrap();
                             bridge::dispatch(&bridge::LiveSink(&srv), &iec_msg, ca);
                         }
+
+                        metrics.messages_dispatched.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }

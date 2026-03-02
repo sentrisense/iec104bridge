@@ -46,6 +46,12 @@
             pkgs.git               # cargo may fetch git sources
             pkgs.cacert            # TLS certs for cargo / git fetches
             pkgs.openssl           # some crates link against it
+
+            # ── Python (demo scripts: publisher, scraper) ─────────
+            (pkgs.python3.withPackages (ps: with ps; [
+              nats-py              # async NATS / JetStream client
+              influxdb-client      # InfluxDB v2 write API
+            ]))
           ];
 
           # ── bindgen environment ───────────────────────────────────

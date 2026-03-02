@@ -1,0 +1,253 @@
+{
+  "id": null,
+  "uid": "dlr-demo",
+  "title": "DLR – Dynamic Line Rating Demo",
+  "description": "2 power lines × 10 spans. Select a line with the variable above.",
+  "tags": ["iec104", "dlr", "demo"],
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "timepicker": {},
+  "schemaVersion": 38,
+  "version": 1,
+  "templating": {
+    "list": [
+      {
+        "name": "line",
+        "label": "Power Line",
+        "type": "custom",
+        "query": "1,2",
+        "current": { "value": "1", "text": "1" },
+        "options": [
+          { "value": "1", "text": "Line 1" },
+          { "value": "2", "text": "Line 2" }
+        ],
+        "includeAll": false,
+        "multi": false,
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Line $line – Ampacity",
+      "description": "Current ampacity of the full line (minimum of all valid span ampacities).",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "influxdb", "uid": "influxdb" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "influxdb", "uid": "influxdb" },
+          "query": "from(bucket: \"iec104\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dlr\")\n  |> filter(fn: (r) => r._field == \"value\")\n  |> filter(fn: (r) => r.measurement_type == \"line_ampacity\")\n  |> filter(fn: (r) => r.line == \"${line}\")\n  |> last()\n  |> yield(name: \"line_amp\")"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "amp",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null },
+              { "color": "yellow", "value": 400 },
+              { "color": "green",  "value": 480 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Line $line – Quality",
+      "description": "Quality of the line ampacity (inherited from the limiting span).",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "influxdb", "uid": "influxdb" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "influxdb", "uid": "influxdb" },
+          "query": "from(bucket: \"iec104\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dlr\")\n  |> filter(fn: (r) => r._field == \"quality_code\")\n  |> filter(fn: (r) => r.measurement_type == \"line_ampacity\")\n  |> filter(fn: (r) => r.line == \"${line}\")\n  |> last()\n  |> yield(name: \"line_quality\")"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "good",        "color": "green"  } } },
+            { "type": "value", "options": { "1": { "text": "not topical", "color": "yellow" } } },
+            { "type": "value", "options": { "2": { "text": "substituted", "color": "orange" } } },
+            { "type": "value", "options": { "3": { "text": "blocked",     "color": "orange" } } },
+            { "type": "value", "options": { "4": { "text": "overflow",    "color": "yellow" } } },
+            { "type": "value", "options": { "5": { "text": "invalid",     "color": "red"    } } }
+          ],
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "orange", "value": 2 },
+              { "color": "red",    "value": 5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Line $line – Span Temperatures (°C)",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 5 },
+      "datasource": { "type": "influxdb", "uid": "influxdb" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "influxdb", "uid": "influxdb" },
+          "query": "from(bucket: \"iec104\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dlr\")\n  |> filter(fn: (r) => r._field == \"value\")\n  |> filter(fn: (r) => r.measurement_type == \"temperature\")\n  |> filter(fn: (r) => r.line == \"${line}\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({ r with _field: \"Span \" + r.span }))\n  |> yield(name: \"temperatures\")"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "custom": { "lineWidth": 2, "fillOpacity": 8, "showPoints": "auto", "spanNulls": false }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "asc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Line $line – Span Ampacities (A)",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 15 },
+      "datasource": { "type": "influxdb", "uid": "influxdb" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "influxdb", "uid": "influxdb" },
+          "query": "from(bucket: \"iec104\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dlr\")\n  |> filter(fn: (r) => r._field == \"value\")\n  |> filter(fn: (r) => r.measurement_type == \"span_ampacity\")\n  |> filter(fn: (r) => r.line == \"${line}\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({ r with _field: \"Span \" + r.span }))\n  |> yield(name: \"span_ampacity\")"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "amp",
+          "custom": { "lineWidth": 2, "fillOpacity": 8, "showPoints": "auto", "spanNulls": false }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "asc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
+      "id": 5,
+      "type": "state-timeline",
+      "title": "Line $line – Span Temperature Quality",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 25 },
+      "datasource": { "type": "influxdb", "uid": "influxdb" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "influxdb", "uid": "influxdb" },
+          "query": "from(bucket: \"iec104\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dlr\")\n  |> filter(fn: (r) => r._field == \"quality_code\")\n  |> filter(fn: (r) => r.measurement_type == \"temperature\")\n  |> filter(fn: (r) => r.line == \"${line}\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> map(fn: (r) => ({ r with _field: \"Span \" + r.span }))\n  |> yield(name: \"temp_quality\")"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 0, "fillOpacity": 100 },
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "good",        "color": "green"  } } },
+            { "type": "value", "options": { "1": { "text": "not topical", "color": "yellow" } } },
+            { "type": "value", "options": { "2": { "text": "substituted", "color": "orange" } } },
+            { "type": "value", "options": { "3": { "text": "blocked",     "color": "orange" } } },
+            { "type": "value", "options": { "4": { "text": "overflow",    "color": "yellow" } } },
+            { "type": "value", "options": { "5": { "text": "invalid",     "color": "red"    } } }
+          ],
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "orange", "value": 2 },
+              { "color": "red",    "value": 5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "alignValue": "left",
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
+      "id": 6,
+      "type": "state-timeline",
+      "title": "Line $line – Span Ampacity Quality",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 33 },
+      "datasource": { "type": "influxdb", "uid": "influxdb" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "influxdb", "uid": "influxdb" },
+          "query": "from(bucket: \"iec104\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dlr\")\n  |> filter(fn: (r) => r._field == \"quality_code\")\n  |> filter(fn: (r) => r.measurement_type == \"span_ampacity\")\n  |> filter(fn: (r) => r.line == \"${line}\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> map(fn: (r) => ({ r with _field: \"Span \" + r.span }))\n  |> yield(name: \"amp_quality\")"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 0, "fillOpacity": 100 },
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "good",        "color": "green"  } } },
+            { "type": "value", "options": { "1": { "text": "not topical", "color": "yellow" } } },
+            { "type": "value", "options": { "2": { "text": "substituted", "color": "orange" } } },
+            { "type": "value", "options": { "3": { "text": "blocked",     "color": "orange" } } },
+            { "type": "value", "options": { "4": { "text": "overflow",    "color": "yellow" } } },
+            { "type": "value", "options": { "5": { "text": "invalid",     "color": "red"    } } }
+          ],
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "orange", "value": 2 },
+              { "color": "red",    "value": 5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "alignValue": "left",
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    }
+  ]
+}
