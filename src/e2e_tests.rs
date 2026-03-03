@@ -39,8 +39,8 @@ async fn run(msgs: Vec<Iec104Message>, default_ca: u16) -> Vec<SentCall> {
     let source: Box<dyn MessageSource> = Box::new(IterSource::new(msgs));
     let mut stream = source.into_messages();
 
-    while let Some(Ok(msg)) = stream.next().await {
-        dispatch(&sink, &msg, default_ca);
+    while let Some(Ok(incoming)) = stream.next().await {
+        dispatch(&sink, &incoming.message, default_ca);
     }
 
     sink.calls.into_inner()

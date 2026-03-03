@@ -23,6 +23,7 @@
 //! newline-delimited JSON, and yield parsed [`Iec104Message`] values through
 //! the stream.
 
+use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::StreamExt as _;
 use tracing::{debug, error, info, warn};
@@ -30,12 +31,60 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::message::Iec104Message;
 
+// ─── IncomingMessage ──────────────────────────────────────────────────────────
+
+/// A parsed message together with an optional back-channel for acknowledging it
+/// to the transport layer.
+///
+/// Call [`IncomingMessage::ack`] **after** the message has been successfully
+/// forwarded to the IEC-104 server. Sources that do not require acknowledgement
+/// (e.g. [`IterSource`] in tests) simply no-op.
+pub struct IncomingMessage {
+    /// The decoded IEC-104 message.
+    pub message: Iec104Message,
+    /// Transport-level ack callback, set only when the source requires it.
+    ack_fn: Option<Box<dyn FnOnce() -> BoxFuture<'static, anyhow::Result<()>> + Send>>,
+}
+
+impl IncomingMessage {
+    /// Create a message that requires no acknowledgement (e.g. test sources).
+    pub fn new(message: Iec104Message) -> Self {
+        Self { message, ack_fn: None }
+    }
+
+    /// Create a message that will invoke `ack` when [`.ack()`](Self::ack) is awaited.
+    pub fn with_ack<F, Fut>(message: Iec104Message, ack: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        Self {
+            message,
+            ack_fn: Some(Box::new(move || Box::pin(ack()))),
+        }
+    }
+
+    /// Acknowledge this message to the transport layer.
+    ///
+    /// This is a no-op for sources that do not require acknowledgement.  For
+    /// NATS JetStream sources it sends an `Ack` to the broker so that the
+    /// message is not redelivered.
+    pub async fn ack(self) -> anyhow::Result<()> {
+        if let Some(f) = self.ack_fn {
+            f().await
+        } else {
+            Ok(())
+        }
+    }
+}
+
 // ─── trait ────────────────────────────────────────────────────────────────────
 
 /// A source of [`Iec104Message`] items.
 ///
 /// Implementors produce a self-contained, `'static` stream.  The stream yields:
-/// * `Ok(msg)` for every successfully received and parsed message.
+/// * `Ok(msg)` for every successfully received and parsed message, bundled in
+///   an [`IncomingMessage`] that carries an optional transport-level ack handle.
 /// * `Err(e)` for transport-level errors (e.g. a broken socket, a closed NATS
 ///   connection).  In that case the bridge logs the error and continues; the
 ///   stream may terminate naturally afterwards.
@@ -47,7 +96,7 @@ use crate::message::Iec104Message;
 /// stream items.
 pub trait MessageSource: Send {
     /// Consume this source and return a stream of parsed messages.
-    fn into_messages(self: Box<Self>) -> BoxStream<'static, anyhow::Result<Iec104Message>>;
+    fn into_messages(self: Box<Self>) -> BoxStream<'static, anyhow::Result<IncomingMessage>>;
 }
 
 // ─── NatsSource ───────────────────────────────────────────────────────────────
@@ -125,7 +174,7 @@ impl NatsSource {
 }
 
 impl MessageSource for NatsSource {
-    fn into_messages(self: Box<Self>) -> BoxStream<'static, anyhow::Result<Iec104Message>> {
+    fn into_messages(self: Box<Self>) -> BoxStream<'static, anyhow::Result<IncomingMessage>> {
         Box::pin(self.messages.filter_map(|result| async move {
             match result {
                 // Transport error – surface it so the bridge can log / break.
@@ -139,13 +188,16 @@ impl MessageSource for NatsSource {
 
                     match serde_json::from_slice::<Iec104Message>(&payload) {
                         Ok(iec_msg) => {
-                            if let Err(e) = msg.ack().await {
-                                error!(error = %e, "Failed to ack NATS message");
-                            }
-                            Some(Ok(iec_msg))
+                            // Do NOT ack here. The caller (run_message_loop) will
+                            // ack only after bridge::dispatch() succeeds, so a
+                            // crash between receive and dispatch triggers redelivery.
+                            let incoming = IncomingMessage::with_ack(iec_msg, move || async move {
+                                msg.ack().await.map_err(|e| anyhow::anyhow!("{e}"))
+                            });
+                            Some(Ok(incoming))
                         }
                         Err(e) => {
-                            // Log, ack (prevent redelivery), and skip.
+                            // Log, ack (prevent redelivery of unparseable data), and skip.
                             warn!(
                                 subject = %subject,
                                 error   = %e,
@@ -186,9 +238,9 @@ impl IterSource {
 
 #[cfg(test)]
 impl MessageSource for IterSource {
-    fn into_messages(self: Box<Self>) -> BoxStream<'static, anyhow::Result<Iec104Message>> {
+    fn into_messages(self: Box<Self>) -> BoxStream<'static, anyhow::Result<IncomingMessage>> {
         Box::pin(futures::stream::iter(
-            self.messages.into_iter().map(Ok),
+            self.messages.into_iter().map(|msg| Ok(IncomingMessage::new(msg))),
         ))
     }
 }
@@ -225,8 +277,8 @@ mod tests {
 
         assert_eq!(result.len(), 3);
         for (i, item) in result.iter().enumerate() {
-            let msg = item.as_ref().unwrap();
-            assert_eq!(msg.ioa, msgs[i].ioa);
+            let incoming = item.as_ref().unwrap();
+            assert_eq!(incoming.message.ioa, msgs[i].ioa);
         }
     }
 

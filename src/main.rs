@@ -253,19 +253,27 @@ pub async fn run_message_loop(
                     Some(Err(e)) => {
                         error!(error = %e, "Error receiving message");
                     }
-                    Some(Ok(iec_msg)) => {
-                        let ca = iec_msg.ca.unwrap_or(default_ca);
+                    Some(Ok(incoming)) => {
+                        let ca = incoming.message.ca.unwrap_or(default_ca);
 
                         // Update the data cache (lock released before any await).
                         {
                             let mut store = data_store.lock().unwrap();
-                            store.insert((ca, iec_msg.ioa), iec_msg.clone());
+                            store.insert((ca, incoming.message.ioa), incoming.message.clone());
                         }
 
                         // Forward to the IEC-104 server.
                         {
                             let srv = server.lock().unwrap();
-                            bridge::dispatch(&bridge::LiveSink(&srv), &iec_msg, ca);
+                            bridge::dispatch(&bridge::LiveSink(&srv), &incoming.message, ca);
+                        }
+
+                        // Ack only after the message has been enqueued in lib60870's
+                        // outbound buffer. A crash before this point will cause the
+                        // broker to redeliver; a crash after is acceptable because
+                        // the data has already been handed to the IEC-104 stack.
+                        if let Err(e) = incoming.ack().await {
+                            error!(error = %e, "Failed to ack NATS message after dispatch");
                         }
 
                         metrics.messages_dispatched.fetch_add(1, Ordering::Relaxed);
