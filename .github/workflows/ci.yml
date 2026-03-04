@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # ── Rust tests + lints ──────────────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # lib60870 compiles a C library via CMake — the same deps as the
+      # Dockerfile builder stage are needed here too.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential clang libclang-dev
+
+      # Pin to stable and pull in fmt + clippy so all three checks share one
+      # toolchain download.
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Cache the Cargo registry and incremental build artefacts.
+      # Keyed on Cargo.lock so a dependency change busts the cache.
+      - name: Cache Cargo artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: cargo test
+        run: cargo test --locked
+
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+  # ── Docker image build ──────────────────────────────────────────────────────
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Buildx gives access to BuildKit features (inline layer caching, etc.).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build the image but do not push.  type=gha caches individual BuildKit
+      # layers in the Actions cache, so dependency layers survive between runs.
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: iec104bridge:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
