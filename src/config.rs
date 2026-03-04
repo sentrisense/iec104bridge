@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2024 Sentrisense
+// Copyright (C) 2026 Sentrisense
 //
 //! Configuration loaded from environment variables.
 //!
@@ -36,6 +36,35 @@ pub struct Config {
     ///
     /// Set via the `METRICS_PORT` environment variable.
     pub metrics_port: u16,
+
+    // ── TLS / IEC 62351-3 ────────────────────────────────────────────────────
+    /// Enable Mutual TLS (IEC 62351-3 compliant transport security).
+    ///
+    /// When `true` the bridge starts a TLS listener on [`Self::tls_port`] and
+    /// requires all three certificate paths to be set.  The `lib60870` server
+    /// is automatically re-bound to loopback so that only the TLS listener
+    /// accepts external connections.
+    ///
+    /// Set via `TLS_ENABLED=true` (default: `false`).
+    pub tls_enabled: bool,
+    /// Path to the server's PEM-encoded certificate chain.
+    ///
+    /// Required when `tls_enabled = true`.  Set via `TLS_CERT_PATH`.
+    pub tls_cert_path: Option<String>,
+    /// Path to the server's PEM-encoded private key.
+    ///
+    /// Required when `tls_enabled = true`.  Set via `TLS_KEY_PATH`.
+    pub tls_key_path: Option<String>,
+    /// Path to the PEM-encoded Root CA certificate used to verify **client**
+    /// certificates (Mutual TLS).
+    ///
+    /// Required when `tls_enabled = true`.  Set via `TLS_CA_CERT_PATH`.
+    pub tls_ca_cert_path: Option<String>,
+    /// TCP port for the external TLS listener (default: `19998`).
+    ///
+    /// Port 19998 is the IANA-registered port for IEC 62351-3 secured IEC-104.
+    /// Set via `TLS_PORT`.
+    pub tls_port: u16,
 }
 
 impl Config {
@@ -86,6 +115,33 @@ impl Config {
             .parse::<u16>()
             .map_err(|_| anyhow::anyhow!("METRICS_PORT must be a valid u16"))?;
 
+        // ── TLS / IEC 62351-3 ────────────────────────────────────────────────
+        let tls_enabled = get("TLS_ENABLED")
+            .map(|v| v.to_lowercase())
+            .map(|v| v == "true" || v == "1" || v == "yes")
+            .unwrap_or(false);
+
+        let tls_cert_path    = get("TLS_CERT_PATH");
+        let tls_key_path     = get("TLS_KEY_PATH");
+        let tls_ca_cert_path = get("TLS_CA_CERT_PATH");
+
+        let tls_port = get("TLS_PORT")
+            .unwrap_or_else(|| "19998".into())
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("TLS_PORT must be a valid u16"))?;
+
+        if tls_enabled {
+            if tls_cert_path.is_none() {
+                anyhow::bail!("TLS_CERT_PATH must be set when TLS_ENABLED=true");
+            }
+            if tls_key_path.is_none() {
+                anyhow::bail!("TLS_KEY_PATH must be set when TLS_ENABLED=true");
+            }
+            if tls_ca_cert_path.is_none() {
+                anyhow::bail!("TLS_CA_CERT_PATH must be set when TLS_ENABLED=true");
+            }
+        }
+
         Ok(Self {
             nats_url,
             nats_stream,
@@ -95,6 +151,11 @@ impl Config {
             iec104_port,
             iec104_default_ca,
             metrics_port,
+            tls_enabled,
+            tls_cert_path,
+            tls_key_path,
+            tls_ca_cert_path,
+            tls_port,
         })
     }
 }
@@ -236,6 +297,83 @@ mod tests {
         let cfg = from_map(&required()).unwrap();
         assert_eq!(cfg.nats_stream, "sensors");
         assert_eq!(cfg.nats_consumer, "bridge");
+    }
+
+    // ── TLS / IEC 62351-3 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn tls_disabled_by_default() {
+        let cfg = from_map(&required()).unwrap();
+        assert!(!cfg.tls_enabled);
+        assert_eq!(cfg.tls_port, 19998);
+        assert!(cfg.tls_cert_path.is_none());
+        assert!(cfg.tls_key_path.is_none());
+        assert!(cfg.tls_ca_cert_path.is_none());
+    }
+
+    #[test]
+    fn tls_enabled_requires_cert_path() {
+        let mut map = required();
+        map.insert("TLS_ENABLED", "true");
+        map.insert("TLS_KEY_PATH", "/key.pem");
+        map.insert("TLS_CA_CERT_PATH", "/ca.pem");
+        // TLS_CERT_PATH missing
+        assert!(from_map(&map).is_err());
+    }
+
+    #[test]
+    fn tls_enabled_requires_key_path() {
+        let mut map = required();
+        map.insert("TLS_ENABLED", "true");
+        map.insert("TLS_CERT_PATH", "/cert.pem");
+        map.insert("TLS_CA_CERT_PATH", "/ca.pem");
+        // TLS_KEY_PATH missing
+        assert!(from_map(&map).is_err());
+    }
+
+    #[test]
+    fn tls_enabled_requires_ca_cert_path() {
+        let mut map = required();
+        map.insert("TLS_ENABLED", "true");
+        map.insert("TLS_CERT_PATH", "/cert.pem");
+        map.insert("TLS_KEY_PATH", "/key.pem");
+        // TLS_CA_CERT_PATH missing
+        assert!(from_map(&map).is_err());
+    }
+
+    #[test]
+    fn tls_enabled_with_all_paths_ok() {
+        let mut map = required();
+        map.insert("TLS_ENABLED", "true");
+        map.insert("TLS_CERT_PATH", "/cert.pem");
+        map.insert("TLS_KEY_PATH", "/key.pem");
+        map.insert("TLS_CA_CERT_PATH", "/ca.pem");
+        let cfg = from_map(&map).unwrap();
+        assert!(cfg.tls_enabled);
+        assert_eq!(cfg.tls_cert_path,    Some("/cert.pem".into()));
+        assert_eq!(cfg.tls_key_path,     Some("/key.pem".into()));
+        assert_eq!(cfg.tls_ca_cert_path, Some("/ca.pem".into()));
+    }
+
+    #[test]
+    fn tls_enabled_truthy_values() {
+        for val in &["true", "1", "yes", "True", "TRUE", "YES"] {
+            let mut map = required();
+            map.insert("TLS_ENABLED", val);
+            map.insert("TLS_CERT_PATH", "/c.pem");
+            map.insert("TLS_KEY_PATH",  "/k.pem");
+            map.insert("TLS_CA_CERT_PATH", "/ca.pem");
+            let cfg = from_map(&map).unwrap();
+            assert!(cfg.tls_enabled, "Expected tls_enabled=true for TLS_ENABLED={val}");
+        }
+    }
+
+    #[test]
+    fn custom_tls_port() {
+        let mut map = required();
+        map.insert("TLS_PORT", "8883");
+        let cfg = from_map(&map).unwrap();
+        assert_eq!(cfg.tls_port, 8883);
     }
 }
 

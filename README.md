@@ -1,26 +1,59 @@
 # IEC-104 Bridge
 
-Reads JSON-encoded process values from a message source (NATS JetStream or a
-local file) and forwards them to connected IEC-104 clients as spontaneous data
-using [lib60870](https://github.com/mz-automation/lib60870).
+Reads JSON-encoded process values from a NATS JetStream consumer and forwards
+them to connected IEC-104 clients as spontaneous data using
+[lib60870](https://github.com/mz-automation/lib60870).
+
+Optional **Mutual TLS (IEC 62351-3)** mode secures the IEC-104 transport layer
+with client-certificate authentication.
 
 ---
 
 ## Architecture
 
+### Plaintext mode (default)
+
 ```mermaid
 flowchart LR
-    src["NATS JetStream\n— or —\nLocal file"]
+    nats["NATS JetStream"]
     bridge["Bridge\nparse + dispatch\ndata cache"]
-    clients["lib60870 server\nTCP 2404\nany IEC-104 master"]
+    clients["lib60870 server\nTCP :2404\nIEC-104 master(s)"]
 
-    src -->|JSON| bridge
-    bridge -->|"IEC-104 ASDUs"| clients
+    nats -->|"JSON (ack after dispatch)"| bridge
+    bridge -->|"IEC-104 ASDUs\n(spontaneous + GI)"| clients
+```
+
+### TLS mode (IEC 62351-3)
+
+When `TLS_ENABLED=true` the lib60870 server binds on loopback only.  A
+separate TLS listener (default port **19998**) handles mTLS handshakes and
+proxies plaintext bytes to lib60870.
+
+```mermaid
+flowchart LR
+    nats["NATS JetStream"]
+    bridge["Bridge\nparse + dispatch\ndata cache"]
+    tls["TLS proxy\nmTLS :19998\nIEC 62351-3"]
+    iec["lib60870 server\n127.0.0.1:2404\n(loopback only)"]
+    master["IEC-104 master\n(SCADA)"]
+
+    nats -->|"JSON"| bridge
+    bridge --> iec
+    master -->|"mTLS"| tls
+    tls -->|"plaintext"| iec
 ```
 
 The bridge maintains a **data cache** keyed by `(ca, ioa)`.  When a client
 sends a **General Interrogation** command the bridge replays the most recent
 value for every cached IOA.
+
+### NATS acknowledgement
+
+NATS JetStream messages are acknowledged **after** `bridge::dispatch()` returns
+(i.e. after the ASDU has been enqueued in lib60870's outbound buffer).  This
+means a crash between message receipt and dispatch causes the broker to
+redeliver the message rather than silently dropping it.  Unparseable (invalid
+JSON) messages are acknowledged immediately to prevent infinite redelivery.
 
 ---
 
@@ -67,16 +100,23 @@ sequenceDiagram
 
 Every TCP payload is an **APDU** (Application Protocol Data Unit):
 
+```mermaid
+packet-beta
+title APDU / ASDU Frame Structure
+0-7: "Start (0x68)"
+8-15: "Length"
+16-47: "Control field (4 bytes)"
+48-55: "Type ID"
+56-63: "VSQ"
+64-79: "COT (2 bytes)"
+80-87: "Originator"
+88-103: "CA (2 bytes)"
+104-127: "Information objects (variable)"
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ Start byte  │ APDU length │  Control field (4 bytes)            │
-│   0x68      │   1 byte    │  I / S / U frame type + seq. nos    │
-├─────────────────────────────────────────────────────────────────┤
-│                  ASDU  (I-frames only)                          │
-│  Type ID │ VSQ │ COT │ Originator │  CA  │  Information objects │
-│  1 byte  │1 byte│2 bytes│1 byte  │2 bytes│  variable length     │
-└─────────────────────────────────────────────────────────────────┘
-```
+
+> The **Type ID** through **Information objects** fields form the **ASDU** and are
+> only present in **I-frames**.  S-frames and U-frames carry only the
+> 6-byte APDU header (Start + Length + Control field).
 
 Key APDU types:
 
@@ -187,17 +227,35 @@ on it.
 
 All configuration is via environment variables.
 
+### Core settings
+
 | Variable | Default | Description |
 |---|---|---|
-| `INPUT_FILE` | *(unset)* | Path to a `.jsonl` file for local dev/testing.  When set, NATS is not used.  An empty string is treated as unset. |
 | `IEC104_PORT` | `2404` | TCP port for the IEC-104 server |
 | `IEC104_CA` | `1` | Default Common Address when the message omits `"ca"` |
-| `IEC104_BIND_ADDR` | `0.0.0.0` | Interface to bind on |
-| `NATS_URL` | `nats://localhost:4222` | NATS server URL *(NATS mode only)* |
-| `NATS_STREAM` | *(required)* | JetStream stream name *(NATS mode only)* |
-| `NATS_CONSUMER` | *(required)* | Durable consumer name *(NATS mode only)* |
-| `NATS_SUBJECT_FILTER` | *(unset)* | Optional subject filter *(NATS mode only)* |
+| `IEC104_BIND_ADDR` | `0.0.0.0` | Interface to bind on (overridden to `127.0.0.1` when TLS is enabled) |
+| `NATS_URL` | `nats://localhost:4222` | NATS server URL (comma-separated for clusters) |
+| `NATS_STREAM` | *(required)* | JetStream stream name |
+| `NATS_CONSUMER` | *(required)* | Durable consumer name |
+| `NATS_SUBJECT_FILTER` | *(unset)* | Optional subject filter applied at the consumer |
+| `METRICS_PORT` | `9091` | TCP port for the Prometheus metrics HTTP endpoint |
 | `RUST_LOG` | `iec104bridge=info` | Log level filter (uses `tracing-subscriber`) |
+
+### Transport security (IEC 62351-3 / mTLS)
+
+| Variable | Default | Description |
+|---|---|---|
+| `TLS_ENABLED` | `false` | Set to `true`, `1`, or `yes` to enable Mutual TLS |
+| `TLS_PORT` | `19998` | External TLS listener port (IANA-registered IEC 62351-3 port) |
+| `TLS_CERT_PATH` | *(required when TLS on)* | Path to the server's PEM certificate chain |
+| `TLS_KEY_PATH` | *(required when TLS on)* | Path to the server's PEM private key (PKCS-8 or PKCS-1) |
+| `TLS_CA_CERT_PATH` | *(required when TLS on)* | Path to the Root CA PEM used to verify **client** certificates |
+
+When `TLS_ENABLED=true`:
+- The IEC-104 server binds on `127.0.0.1:IEC104_PORT` (loopback only — not directly reachable from the network).
+- A TLS proxy listens on `IEC104_BIND_ADDR:TLS_PORT`, performs the mTLS handshake, and forwards plaintext to lib60870.
+- All three certificate paths are **required** — the bridge refuses to start if any is missing.
+- rustls's default cipher suite list is used: TLS 1.3 (preferred) + TLS 1.2. No unsafe ciphers are enabled.
 
 ---
 
@@ -210,7 +268,9 @@ cargo build --release
 
 ---
 
-## Running with NATS
+## Running
+
+### Plaintext mode
 
 ```bash
 export NATS_URL="nats://localhost:4222"
@@ -222,12 +282,54 @@ export IEC104_CA=1
 cargo run
 ```
 
-Publish a message:
+Publish a test message:
 
 ```bash
 nats pub plant.a.breaker '{"ioa":1001,"value":true,"type":"single_point"}'
 nats pub plant.a.voltage '{"ioa":2001,"value":132.4,"type":"float"}'
 ```
+
+### mTLS mode (IEC 62351-3)
+
+Generate test certificates (replace with your CA-issued certificates in production):
+
+```bash
+# Root CA
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -days 3650 \
+    -keyout ca.key -out ca.crt -nodes -subj "/CN=IEC62351-CA"
+
+# Server key + CSR + sign
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+    -keyout server.key -out server.csr -nodes -subj "/CN=iec104bridge"
+openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \
+    -CAcreateserial -out server.crt -days 365
+
+# Client key + CSR + sign (for the SCADA master)
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+    -keyout client.key -out client.csr -nodes -subj "/CN=scada-master"
+openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key \
+    -CAcreateserial -out client.crt -days 365
+```
+
+Run the bridge in TLS mode:
+
+```bash
+export NATS_URL="nats://localhost:4222"
+export NATS_STREAM="sensors"
+export NATS_CONSUMER="iec104bridge"
+export TLS_ENABLED=true
+export TLS_CERT_PATH=/etc/iec104/server.crt
+export TLS_KEY_PATH=/etc/iec104/server.key
+export TLS_CA_CERT_PATH=/etc/iec104/ca.crt
+# TLS_PORT defaults to 19998; IEC104_PORT stays 2404 (loopback only)
+cargo run
+```
+
+The bridge will:
+1. Bind lib60870 on `127.0.0.1:2404` (not externally reachable).
+2. Start a TLS listener on `0.0.0.0:19998`.
+3. Reject any client that does not present a certificate signed by `ca.crt`.
+4. Log a warning with the failure reason for any failed handshake.
 
 ---
 
@@ -235,7 +337,7 @@ nats pub plant.a.voltage '{"ioa":2001,"value":132.4,"type":"float"}'
 
 [`examples/messages.jsonl`](examples/messages.jsonl) contains a static DLR
 snapshot matching the IOA scheme used by the demo publisher.  It is intended
-for local `INPUT_FILE` testing; the live demo uses NATS.
+as a reference for IOA layout and message format; the live demo uses NATS.
 
 | IOA range | CA | Type | Description |
 |---|---|---|---|
@@ -249,15 +351,15 @@ for local `INPUT_FILE` testing; the live demo uses NATS.
 
 | Source | How to select | Use case |
 |---|---|---|
-| `NatsSource` | `INPUT_FILE` not set | Production / demo |
-| `FileSource` | `INPUT_FILE=/path/to/file.jsonl` | Local dev testing, log replay |
+| `NatsSource` | Default | Production / demo |
 | `IterSource` | Programmatically (tests only) | Unit / integration tests |
 
 New sources can be added by implementing the `MessageSource` trait in
-`src/source.rs`.  A Unix-socket or TCP-stream source is planned for scenarios
-where a co-located process produces values without NATS.
+`src/source.rs`.  A `FileSource` (JSONL replay) or a Unix-socket source are
+natural future additions.
 
 ---
+
 
 ## Integration guide
 
@@ -275,10 +377,21 @@ be configured to match.  The bridge cannot operate correctly without them.
 | Item | Description | Example |
 |---|---|---|
 | **Bind address** | Interface the bridge should listen on.  Typically the IP of the NIC facing the SCADA network, or `0.0.0.0` to listen on all interfaces. | `192.168.10.5` |
-| **IEC-104 port** | TCP port the client's master (SCADA) will connect to.  Default is `2404`; some installations use a non-standard port. | `2404` |
-| **Common Address(es)** | The CA value(s) the SCADA master is configured to poll.  One CA per logical outstation.  Range: 1 – 65 534. | `1`, `42` |
+| **IEC-104 port** | TCP port lib60870 binds on.  In plaintext mode this is the external port; in TLS mode it is loopback-only and `TLS_PORT` (19998) is the external port. | `2404` |
+| **Common Address(es)** | The CA value(s) the SCADA master is configured to poll.  One CA per logical outstation.  Range: 1 – 65 534. | `1`, `42` |
 | **Simultaneous client count** | Maximum number of IEC-104 masters that will connect at the same time.  Affects internal buffer sizing. | `2` |
-| **Network path / firewall rules** | Confirmation that TCP on the chosen port is open between the SCADA host and bridge host. | — |
+| **Transport security required?** | Does the client's security policy mandate IEC†62351-3 (mTLS)?  If yes, collect the certificate artefacts listed below. | yes / no |
+| **Network path / firewall rules** | Confirmation that TCP on the chosen port (2404 plaintext, or 19998 TLS) is open between the SCADA host and bridge host. | — |
+
+#### Transport security / IEC 62351-3 (when required)
+
+| Item | Description | Example |
+|---|---|---|
+| **CA certificate** | PEM file of the Root CA that has signed — and will sign — all device certificates on this installation.  Used to verify both the server cert and all client certs. | `root-ca.crt` |
+| **Server certificate + key** | PEM certificate chain and private key for the bridge itself, signed by the CA above.  The CN or SAN should identify the bridge host. | `server.crt`, `server.key` |
+| **Client certificate(s)** | Certificate(s) issued by the same CA for each SCADA master that will connect.  The bridge does not need these files — they must be installed on the master side — but the integrator must confirm they have been issued and are trusted by the CA. | `scada-master.crt` |
+| **Certificate validity / renewal** | Expiry dates and renewal process.  The bridge logs a warning on failed handshakes (including expired certs) but does not auto-renew. | annual renewal |
+| **TLS port** | External port for the TLS listener (default `19998`).  Confirm firewall permits this port from all master IP addresses. | `19998` |
 
 #### SCADA / master capabilities
 
@@ -392,4 +505,16 @@ Decide what happens when the upstream publisher reports degraded quality:
 [ ] End-to-end test: publish one message per Type ID, confirm SCADA receives it
 [ ] GI test: trigger General Interrogation, confirm all cached points returned
 [ ] Failover test: disconnect and reconnect NATS; confirm bridge recovers
+
+# If TLS / IEC 62351-3 is required:
+[ ] Root CA certificate obtained and trusted by both bridge and SCADA master
+[ ] Server certificate and private key issued, signed by Root CA
+[ ] Client certificate(s) issued for each SCADA master, signed by Root CA
+[ ] TLS_ENABLED=true and all three TLS_*_PATH vars set in bridge config
+[ ] Firewall permits TCP on TLS_PORT (default 19998) from master IP(s)
+[ ] Handshake test: connect a test client with the client cert, confirm bridge logs
+  "TLS handshake completed – client certificate accepted"
+[ ] Rejection test: connect without a client cert, confirm bridge logs
+  "TLS handshake failed – connection dropped"
+[ ] Certificate expiry dates recorded; renewal procedure agreed
 ```

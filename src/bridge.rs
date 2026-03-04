@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2024 Sentrisense
+// Copyright (C) 2026 Sentrisense
 ////! Converts [`Iec104Message`] values into lib60870 Server calls.
 //!
 //! The main entry-point is [`dispatch`], which is generic over any [`DataSink`]

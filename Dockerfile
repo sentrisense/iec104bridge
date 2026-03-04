@@ -37,7 +37,7 @@ COPY src/ src/
 RUN touch src/main.rs && cargo build --release
 
 # ─── Stage 2 – minimal runtime ────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \

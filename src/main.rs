@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2024 Sentrisense
+// Copyright (C) 2026 Sentrisense
 //
 //! IEC-104 bridge – subscribes to a message source and forwards JSON messages
 //! to connected IEC-104 clients as spontaneous data.
@@ -39,6 +39,7 @@ mod bridge;
 mod config;
 mod message;
 mod source;
+mod tls;
 
 #[cfg(test)]
 mod e2e_tests;
@@ -57,6 +58,7 @@ use tracing::{error, info, warn};
 use config::Config;
 use message::Iec104Message;
 use source::{MessageSource, NatsSource};
+use tls::TlsConfig;
 
 // ─── Shared metrics ───────────────────────────────────────────────────────────
 
@@ -88,6 +90,8 @@ async fn main() -> anyhow::Result<()> {
         iec104_port  = config.iec104_port,
         iec104_ca    = config.iec104_default_ca,
         metrics_port = config.metrics_port,
+        tls_enabled  = config.tls_enabled,
+        tls_port     = config.tls_port,
         "Starting IEC-104 bridge"
     );
 
@@ -101,8 +105,18 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(Mutex::new(HashMap::new()));
 
     // ── IEC-104 server ────────────────────────────────────────────────────────
+    // When TLS is enabled the lib60870 server binds only on loopback so that
+    // external connections must go through the TLS proxy (port 19998).  In
+    // plaintext mode it binds on the configured address (default 0.0.0.0).
+    let iec104_bind_addr = if config.tls_enabled {
+        info!("TLS mode: binding lib60870 to loopback only (127.0.0.1)");
+        "127.0.0.1".to_string()
+    } else {
+        config.iec104_bind_addr.clone()
+    };
+
     let mut iec_server = ServerBuilder::new()
-        .local_address(&config.iec104_bind_addr)
+        .local_address(&iec104_bind_addr)
         .local_port(config.iec104_port)
         .build()
         .ok_or_else(|| anyhow::anyhow!("Failed to build IEC-104 server"))?;
@@ -162,6 +176,45 @@ async fn main() -> anyhow::Result<()> {
 
     let server: Arc<Mutex<lib60870::Server>> = Arc::new(Mutex::new(iec_server));
     *server_slot.lock().unwrap() = Some(Arc::clone(&server));
+
+    // ── TLS listener (IEC 62351-3) ────────────────────────────────────────────
+    // When TLS is enabled, accept connections on the TLS port (default 19998),
+    // perform the mTLS handshake, then proxy plaintext to lib60870's loopback
+    // socket.  This runs as an independent Tokio task so it does not block the
+    // main message loop.
+    if config.tls_enabled {
+        let tls_cfg = TlsConfig {
+            cert_path:    config.tls_cert_path.clone().expect("validated in Config::from_lookup"),
+            key_path:     config.tls_key_path.clone().expect("validated in Config::from_lookup"),
+            ca_cert_path: config.tls_ca_cert_path.clone().expect("validated in Config::from_lookup"),
+        };
+
+        let acceptor = tls::build_acceptor(&tls_cfg)
+            .map_err(|e| anyhow::anyhow!("Failed to build TLS acceptor: {e}"))?;
+
+        let tls_bind = format!("{}:{}", config.iec104_bind_addr, config.tls_port);
+        let iec104_local: std::net::SocketAddr =
+            format!("127.0.0.1:{}", config.iec104_port).parse()?;
+
+        let tls_listener = tokio::net::TcpListener::bind(&tls_bind)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to bind TLS listener on {tls_bind}: {e}"))?;
+
+        info!(addr = %tls_bind, "TLS (IEC 62351-3) listener started");
+
+        tokio::spawn(async move {
+            loop {
+                match tls_listener.accept().await {
+                    Ok((tcp, peer)) => {
+                        tls::spawn_tls_proxy(tcp, acceptor.clone(), peer, iec104_local);
+                    }
+                    Err(e) => {
+                        error!(error = %e, "TLS listener: accept error");
+                    }
+                }
+            }
+        });
+    }
 
     // ── Prometheus metrics HTTP server ────────────────────────────────────────
     {

@@ -14,3 +14,11 @@ futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+
+# IEC 62351-3 / mTLS support
+rustls          = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+tokio-rustls    = "0.26"
+rustls-pemfile  = "2"
+
+[dev-dependencies]
+tempfile = "3"

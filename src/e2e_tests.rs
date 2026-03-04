@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2024 Sentrisense
+// Copyright (C) 2026 Sentrisense
 //
 //! End-to-end tests that exercise the full pipeline:
 //!
