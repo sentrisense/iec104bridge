@@ -163,7 +163,14 @@ pub fn dispatch<S: DataSink>(sink: &S, msg: &Iec104Message, default_ca: u16) {
     let cot = map_cot(msg.cot);
     let data_type = msg.data_type.unwrap_or_else(|| infer_type(&msg.value));
 
-    debug!(ioa, ca, ?data_type, ?cot, ?quality, "dispatching IEC-104 message");
+    debug!(
+        ioa,
+        ca,
+        ?data_type,
+        ?cot,
+        ?quality,
+        "dispatching IEC-104 message"
+    );
 
     match (data_type, &msg.value) {
         // ── SinglePoint ───────────────────────────────────────────────────────
@@ -196,14 +203,16 @@ pub fn dispatch<S: DataSink>(sink: &S, msg: &Iec104Message, default_ca: u16) {
         // ── DoublePoint (fall back to single-point for now) ───────────────────
         (DataType::DoublePoint, DataValue::Bool(v)) => {
             warn!(
-                ioa, ca,
+                ioa,
+                ca,
                 "DoublePoint not natively supported via convenience API; sending as SinglePoint"
             );
             sink.send_single_point(cot, ca, ioa, *v, quality);
         }
         (DataType::DoublePoint, DataValue::Number(n)) => {
             warn!(
-                ioa, ca,
+                ioa,
+                ca,
                 "DoublePoint not natively supported via convenience API; sending as SinglePoint"
             );
             sink.send_single_point(cot, ca, ioa, *n != 0.0, quality);
@@ -267,9 +276,13 @@ pub(crate) mod test_support {
             value: bool,
             quality: Quality,
         ) {
-            self.calls
-                .borrow_mut()
-                .push(SentCall::SinglePoint { cot, ca, ioa, value, quality });
+            self.calls.borrow_mut().push(SentCall::SinglePoint {
+                cot,
+                ca,
+                ioa,
+                value,
+                quality,
+            });
         }
 
         fn send_measured_float(
@@ -280,9 +293,13 @@ pub(crate) mod test_support {
             value: f32,
             quality: Quality,
         ) {
-            self.calls
-                .borrow_mut()
-                .push(SentCall::MeasuredFloat { cot, ca, ioa, value, quality });
+            self.calls.borrow_mut().push(SentCall::MeasuredFloat {
+                cot,
+                ca,
+                ioa,
+                value,
+                quality,
+            });
         }
 
         fn send_measured_scaled(
@@ -293,9 +310,13 @@ pub(crate) mod test_support {
             value: i16,
             quality: Quality,
         ) {
-            self.calls
-                .borrow_mut()
-                .push(SentCall::MeasuredScaled { cot, ca, ioa, value, quality });
+            self.calls.borrow_mut().push(SentCall::MeasuredScaled {
+                cot,
+                ca,
+                ioa,
+                value,
+                quality,
+            });
         }
     }
 }
@@ -306,8 +327,8 @@ pub(crate) mod test_support {
 mod tests {
     use lib60870::types::{CauseOfTransmission, Quality};
 
-    use super::*;
     use super::test_support::{CapturingSink, SentCall};
+    use super::*;
     use crate::message::{CotField, DataType, DataValue, Iec104Message, QualityField};
 
     // ── helpers ───────────────────────────────────────────────────────────────
@@ -320,15 +341,36 @@ mod tests {
         cot: CotField,
         ca: Option<u16>,
     ) -> Iec104Message {
-        Iec104Message { ioa, value, data_type, quality, cot, ca }
+        Iec104Message {
+            ioa,
+            value,
+            data_type,
+            quality,
+            cot,
+            ca,
+        }
     }
 
     fn simple_float(ioa: u32, v: f64) -> Iec104Message {
-        make_msg(ioa, DataValue::Number(v), Some(DataType::Float), QualityField::Good, CotField::Spontaneous, None)
+        make_msg(
+            ioa,
+            DataValue::Number(v),
+            Some(DataType::Float),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        )
     }
 
     fn simple_bool(ioa: u32, v: bool) -> Iec104Message {
-        make_msg(ioa, DataValue::Bool(v), Some(DataType::SinglePoint), QualityField::Good, CotField::Spontaneous, None)
+        make_msg(
+            ioa,
+            DataValue::Bool(v),
+            Some(DataType::SinglePoint),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        )
     }
 
     // ── map_quality ───────────────────────────────────────────────────────────
@@ -367,7 +409,10 @@ mod tests {
 
     #[test]
     fn map_cot_spontaneous() {
-        assert_eq!(map_cot(CotField::Spontaneous), CauseOfTransmission::Spontaneous);
+        assert_eq!(
+            map_cot(CotField::Spontaneous),
+            CauseOfTransmission::Spontaneous
+        );
     }
 
     #[test]
@@ -377,48 +422,87 @@ mod tests {
 
     #[test]
     fn map_cot_background_scan() {
-        assert_eq!(map_cot(CotField::BackgroundScan), CauseOfTransmission::Background);
+        assert_eq!(
+            map_cot(CotField::BackgroundScan),
+            CauseOfTransmission::Background
+        );
     }
 
     #[test]
     fn map_cot_interrogated() {
-        assert_eq!(map_cot(CotField::Interrogated), CauseOfTransmission::InterrogatedByStation);
+        assert_eq!(
+            map_cot(CotField::Interrogated),
+            CauseOfTransmission::InterrogatedByStation
+        );
     }
 
     #[test]
     fn map_cot_return_info_remote() {
-        assert_eq!(map_cot(CotField::ReturnInfoRemote), CauseOfTransmission::ReturnRemote);
+        assert_eq!(
+            map_cot(CotField::ReturnInfoRemote),
+            CauseOfTransmission::ReturnRemote
+        );
     }
 
     #[test]
     fn map_cot_return_info_local() {
-        assert_eq!(map_cot(CotField::ReturnInfoLocal), CauseOfTransmission::ReturnLocal);
+        assert_eq!(
+            map_cot(CotField::ReturnInfoLocal),
+            CauseOfTransmission::ReturnLocal
+        );
     }
 
     // ── infer_type (tested indirectly via dispatch with data_type: None) ──────
 
     #[test]
     fn infer_type_bool_yields_single_point() {
-        let msg = make_msg(1, DataValue::Bool(true), None, QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Bool(true),
+            None,
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::SinglePoint { value: true, .. }));
+        assert!(matches!(
+            calls[0],
+            SentCall::SinglePoint { value: true, .. }
+        ));
     }
 
     #[test]
     fn infer_type_integer_yields_scaled() {
         // 42 has no fractional part and fits in i16 → Scaled
-        let msg = make_msg(1, DataValue::Number(42.0), None, QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Number(42.0),
+            None,
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::MeasuredScaled { value: 42, .. }));
+        assert!(matches!(
+            calls[0],
+            SentCall::MeasuredScaled { value: 42, .. }
+        ));
     }
 
     #[test]
     fn infer_type_float_yields_measured_float() {
-        let msg = make_msg(1, DataValue::Number(1.5), None, QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Number(1.5),
+            None,
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
@@ -450,25 +534,48 @@ mod tests {
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::SinglePoint { value: false, .. }));
+        assert!(matches!(
+            calls[0],
+            SentCall::SinglePoint { value: false, .. }
+        ));
     }
 
     #[test]
     fn dispatch_single_point_nonzero_number_is_on() {
-        let msg = make_msg(1, DataValue::Number(5.0), Some(DataType::SinglePoint), QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Number(5.0),
+            Some(DataType::SinglePoint),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::SinglePoint { value: true, .. }));
+        assert!(matches!(
+            calls[0],
+            SentCall::SinglePoint { value: true, .. }
+        ));
     }
 
     #[test]
     fn dispatch_single_point_zero_number_is_off() {
-        let msg = make_msg(1, DataValue::Number(0.0), Some(DataType::SinglePoint), QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Number(0.0),
+            Some(DataType::SinglePoint),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::SinglePoint { value: false, .. }));
+        assert!(matches!(
+            calls[0],
+            SentCall::SinglePoint { value: false, .. }
+        ));
     }
 
     // ── dispatch – Float ──────────────────────────────────────────────────────
@@ -479,12 +586,21 @@ mod tests {
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::MeasuredFloat { value, .. } if (value - 1.5_f32).abs() < 1e-6));
+        assert!(
+            matches!(calls[0], SentCall::MeasuredFloat { value, .. } if (value - 1.5_f32).abs() < 1e-6)
+        );
     }
 
     #[test]
     fn dispatch_float_bool_true_is_one() {
-        let msg = make_msg(1, DataValue::Bool(true), Some(DataType::Float), QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Bool(true),
+            Some(DataType::Float),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
@@ -493,7 +609,14 @@ mod tests {
 
     #[test]
     fn dispatch_float_bool_false_is_zero() {
-        let msg = make_msg(1, DataValue::Bool(false), Some(DataType::Float), QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Bool(false),
+            Some(DataType::Float),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
@@ -504,7 +627,14 @@ mod tests {
 
     #[test]
     fn dispatch_normalized_number() {
-        let msg = make_msg(1, DataValue::Number(0.75), Some(DataType::Normalized), QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Number(0.75),
+            Some(DataType::Normalized),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
@@ -515,65 +645,138 @@ mod tests {
 
     #[test]
     fn dispatch_scaled_number() {
-        let msg = make_msg(1, DataValue::Number(1000.0), Some(DataType::Scaled), QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Number(1000.0),
+            Some(DataType::Scaled),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::MeasuredScaled { value: 1000, .. }));
+        assert!(matches!(
+            calls[0],
+            SentCall::MeasuredScaled { value: 1000, .. }
+        ));
     }
 
     #[test]
     fn dispatch_scaled_clamps_to_i16_max() {
-        let msg = make_msg(1, DataValue::Number(100_000.0), Some(DataType::Scaled), QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Number(100_000.0),
+            Some(DataType::Scaled),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::MeasuredScaled { value: i16::MAX, .. }));
+        assert!(matches!(
+            calls[0],
+            SentCall::MeasuredScaled {
+                value: i16::MAX,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn dispatch_scaled_clamps_to_i16_min() {
-        let msg = make_msg(1, DataValue::Number(-100_000.0), Some(DataType::Scaled), QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Number(-100_000.0),
+            Some(DataType::Scaled),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::MeasuredScaled { value: i16::MIN, .. }));
+        assert!(matches!(
+            calls[0],
+            SentCall::MeasuredScaled {
+                value: i16::MIN,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn dispatch_scaled_bool_true_is_one() {
-        let msg = make_msg(1, DataValue::Bool(true), Some(DataType::Scaled), QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Bool(true),
+            Some(DataType::Scaled),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::MeasuredScaled { value: 1, .. }));
+        assert!(matches!(
+            calls[0],
+            SentCall::MeasuredScaled { value: 1, .. }
+        ));
     }
 
     // ── dispatch – DoublePoint fallback ───────────────────────────────────────
 
     #[test]
     fn dispatch_double_point_bool_falls_back_to_single() {
-        let msg = make_msg(1, DataValue::Bool(true), Some(DataType::DoublePoint), QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Bool(true),
+            Some(DataType::DoublePoint),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::SinglePoint { value: true, .. }));
+        assert!(matches!(
+            calls[0],
+            SentCall::SinglePoint { value: true, .. }
+        ));
     }
 
     #[test]
     fn dispatch_double_point_number_falls_back_to_single() {
-        let msg = make_msg(1, DataValue::Number(1.0), Some(DataType::DoublePoint), QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Number(1.0),
+            Some(DataType::DoublePoint),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::SinglePoint { value: true, .. }));
+        assert!(matches!(
+            calls[0],
+            SentCall::SinglePoint { value: true, .. }
+        ));
     }
 
     // ── dispatch – CA fall-through ────────────────────────────────────────────
 
     #[test]
     fn dispatch_uses_message_ca_over_default() {
-        let msg = make_msg(1, DataValue::Bool(true), Some(DataType::SinglePoint), QualityField::Good, CotField::Spontaneous, Some(42));
+        let msg = make_msg(
+            1,
+            DataValue::Bool(true),
+            Some(DataType::SinglePoint),
+            QualityField::Good,
+            CotField::Spontaneous,
+            Some(42),
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
@@ -593,21 +796,43 @@ mod tests {
 
     #[test]
     fn dispatch_propagates_invalid_quality() {
-        let msg = make_msg(1, DataValue::Bool(true), Some(DataType::SinglePoint), QualityField::Invalid, CotField::Spontaneous, None);
+        let msg = make_msg(
+            1,
+            DataValue::Bool(true),
+            Some(DataType::SinglePoint),
+            QualityField::Invalid,
+            CotField::Spontaneous,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::SinglePoint { quality, .. } if quality == Quality::INVALID));
+        assert!(
+            matches!(calls[0], SentCall::SinglePoint { quality, .. } if quality == Quality::INVALID)
+        );
     }
 
     // ── dispatch – COT propagation ────────────────────────────────────────────
 
     #[test]
     fn dispatch_propagates_periodic_cot() {
-        let msg = make_msg(1, DataValue::Bool(true), Some(DataType::SinglePoint), QualityField::Good, CotField::Periodic, None);
+        let msg = make_msg(
+            1,
+            DataValue::Bool(true),
+            Some(DataType::SinglePoint),
+            QualityField::Good,
+            CotField::Periodic,
+            None,
+        );
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();
-        assert!(matches!(calls[0], SentCall::SinglePoint { cot: CauseOfTransmission::Periodic, .. }));
+        assert!(matches!(
+            calls[0],
+            SentCall::SinglePoint {
+                cot: CauseOfTransmission::Periodic,
+                ..
+            }
+        ));
     }
 }

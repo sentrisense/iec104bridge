@@ -23,9 +23,9 @@
 //! newline-delimited JSON, and yield parsed [`Iec104Message`] values through
 //! the stream.
 
+use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use futures::StreamExt as _;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
@@ -49,7 +49,10 @@ pub struct IncomingMessage {
 impl IncomingMessage {
     /// Create a message that requires no acknowledgement (e.g. test sources).
     pub fn new(message: Iec104Message) -> Self {
-        Self { message, ack_fn: None }
+        Self {
+            message,
+            ack_fn: None,
+        }
     }
 
     /// Create a message that will invoke `ack` when [`.ack()`](Self::ack) is awaited.
@@ -125,9 +128,9 @@ impl NatsSource {
         // A comma-separated string (common in docker-compose env vars) must be
         // split before being passed; passing the raw string causes a parse error.
         let urls: Vec<&str> = config.nats_url.split(',').map(str::trim).collect();
-        let client = async_nats::connect(urls.as_slice())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to NATS at {}: {e}", config.nats_url))?;
+        let client = async_nats::connect(urls.as_slice()).await.map_err(|e| {
+            anyhow::anyhow!("Failed to connect to NATS at {}: {e}", config.nats_url)
+        })?;
 
         info!("Connected to NATS");
 
@@ -136,7 +139,9 @@ impl NatsSource {
         let stream = jetstream
             .get_stream(&config.nats_stream)
             .await
-            .map_err(|e| anyhow::anyhow!("JetStream stream '{}' not found: {e}", config.nats_stream))?;
+            .map_err(|e| {
+                anyhow::anyhow!("JetStream stream '{}' not found: {e}", config.nats_stream)
+            })?;
 
         info!(stream = %config.nats_stream, "Opened JetStream stream");
 
@@ -156,7 +161,10 @@ impl NatsSource {
             .get_or_create_consumer(&config.nats_consumer, consumer_config)
             .await
             .map_err(|e| {
-                anyhow::anyhow!("Failed to get/create consumer '{}': {e}", config.nats_consumer)
+                anyhow::anyhow!(
+                    "Failed to get/create consumer '{}': {e}",
+                    config.nats_consumer
+                )
             })?;
 
         info!(consumer = %config.nats_consumer, "Subscribed to JetStream consumer");
@@ -240,7 +248,9 @@ impl IterSource {
 impl MessageSource for IterSource {
     fn into_messages(self: Box<Self>) -> BoxStream<'static, anyhow::Result<IncomingMessage>> {
         Box::pin(futures::stream::iter(
-            self.messages.into_iter().map(|msg| Ok(IncomingMessage::new(msg))),
+            self.messages
+                .into_iter()
+                .map(|msg| Ok(IncomingMessage::new(msg))),
         ))
     }
 }
@@ -252,7 +262,7 @@ mod tests {
     use futures::StreamExt as _;
 
     use super::*;
-    use crate::message::{CotField, DataValue, DataType, QualityField};
+    use crate::message::{CotField, DataType, DataValue, QualityField};
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -288,5 +298,4 @@ mod tests {
         let result: Vec<_> = source.into_messages().collect().await;
         assert!(result.is_empty());
     }
-
 }

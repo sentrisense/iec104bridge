@@ -289,7 +289,8 @@ mod tests {
     #[test]
     fn unknown_quality_fails() {
         assert!(
-            serde_json::from_str::<Iec104Message>(r#"{"ioa": 1, "value": 0, "quality": "bogus"}"#).is_err()
+            serde_json::from_str::<Iec104Message>(r#"{"ioa": 1, "value": 0, "quality": "bogus"}"#)
+                .is_err()
         );
     }
 

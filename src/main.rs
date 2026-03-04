@@ -65,7 +65,7 @@ use tls::TlsConfig;
 #[derive(Debug, Default)]
 pub struct Metrics {
     pub messages_dispatched: AtomicU64,
-    pub gi_responses:        AtomicU64,
+    pub gi_responses: AtomicU64,
 }
 
 #[tokio::main]
@@ -136,38 +136,39 @@ async fn main() -> anyhow::Result<()> {
     // Server is not yet wrapped in an Arc when the handler is registered.  We
     // work around this with an Arc<Mutex<Option<Arc<Mutex<Server>>>>> that is
     // set to Some(...) immediately after the server is promoted to an Arc.
-    let server_slot: Arc<Mutex<Option<Arc<Mutex<lib60870::Server>>>>> =
-        Arc::new(Mutex::new(None));
+    let server_slot: Arc<Mutex<Option<Arc<Mutex<lib60870::Server>>>>> = Arc::new(Mutex::new(None));
 
     {
-        let slot_clone    = Arc::clone(&server_slot);
-        let store_clone   = Arc::clone(&data_store);
+        let slot_clone = Arc::clone(&server_slot);
+        let store_clone = Arc::clone(&data_store);
         let metrics_clone = Arc::clone(&metrics);
-        let default_ca    = config.iec104_default_ca;
+        let default_ca = config.iec104_default_ca;
 
-        iec_server.set_interrogation_handler(move |conn: &lib60870::MasterConnection, asdu: lib60870::Asdu, qoi: u8| {
-            info!(qoi, "Received station interrogation");
+        iec_server.set_interrogation_handler(
+            move |conn: &lib60870::MasterConnection, asdu: lib60870::Asdu, qoi: u8| {
+                info!(qoi, "Received station interrogation");
 
-            conn.send_act_con(&asdu, false);
+                conn.send_act_con(&asdu, false);
 
-            if let Some(ref srv_arc) = *slot_clone.lock().unwrap() {
-                let store  = store_clone.lock().unwrap();
-                let server = srv_arc.lock().unwrap();
+                if let Some(ref srv_arc) = *slot_clone.lock().unwrap() {
+                    let store = store_clone.lock().unwrap();
+                    let server = srv_arc.lock().unwrap();
 
-                for (_, msg) in store.iter() {
-                    let ca = msg.ca.unwrap_or(default_ca);
-                    if qoi == QOI_STATION {
-                        bridge::dispatch(&bridge::LiveSink(&server), msg, ca);
+                    for (_, msg) in store.iter() {
+                        let ca = msg.ca.unwrap_or(default_ca);
+                        if qoi == QOI_STATION {
+                            bridge::dispatch(&bridge::LiveSink(&server), msg, ca);
+                        }
+                        // For group-specific interrogations (qoi 21–36) filter by
+                        // IOA group range here.
                     }
-                    // For group-specific interrogations (qoi 21–36) filter by
-                    // IOA group range here.
                 }
-            }
 
-            metrics_clone.gi_responses.fetch_add(1, Ordering::Relaxed);
-            conn.send_act_term(&asdu);
-            true
-        });
+                metrics_clone.gi_responses.fetch_add(1, Ordering::Relaxed);
+                conn.send_act_term(&asdu);
+                true
+            },
+        );
     }
 
     // Start the server and promote it to a shared Arc.
@@ -184,9 +185,18 @@ async fn main() -> anyhow::Result<()> {
     // main message loop.
     if config.tls_enabled {
         let tls_cfg = TlsConfig {
-            cert_path:    config.tls_cert_path.clone().expect("validated in Config::from_lookup"),
-            key_path:     config.tls_key_path.clone().expect("validated in Config::from_lookup"),
-            ca_cert_path: config.tls_ca_cert_path.clone().expect("validated in Config::from_lookup"),
+            cert_path: config
+                .tls_cert_path
+                .clone()
+                .expect("validated in Config::from_lookup"),
+            key_path: config
+                .tls_key_path
+                .clone()
+                .expect("validated in Config::from_lookup"),
+            ca_cert_path: config
+                .tls_ca_cert_path
+                .clone()
+                .expect("validated in Config::from_lookup"),
         };
 
         let acceptor = tls::build_acceptor(&tls_cfg)
@@ -218,24 +228,32 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Prometheus metrics HTTP server ────────────────────────────────────────
     {
-        let metrics_clone    = Arc::clone(&metrics);
+        let metrics_clone = Arc::clone(&metrics);
         let data_store_clone = Arc::clone(&data_store);
-        let metrics_port     = config.metrics_port;
+        let metrics_port = config.metrics_port;
 
         tokio::spawn(async move {
             let addr = format!("0.0.0.0:{metrics_port}");
             let listener = match TcpListener::bind(&addr).await {
-                Ok(l)  => { info!(port = metrics_port, "Metrics endpoint listening"); l }
-                Err(e) => { error!(error = %e, "Failed to bind metrics port"); return; }
+                Ok(l) => {
+                    info!(port = metrics_port, "Metrics endpoint listening");
+                    l
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to bind metrics port");
+                    return;
+                }
             };
             loop {
-                let Ok((mut stream, _)) = listener.accept().await else { continue };
-                let metrics_ref    = Arc::clone(&metrics_clone);
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    continue;
+                };
+                let metrics_ref = Arc::clone(&metrics_clone);
                 let data_store_ref = Arc::clone(&data_store_clone);
                 tokio::spawn(async move {
-                    let cache_size      = data_store_ref.lock().unwrap().len() as u64;
+                    let cache_size = data_store_ref.lock().unwrap().len() as u64;
                     let msgs_dispatched = metrics_ref.messages_dispatched.load(Ordering::Relaxed);
-                    let gi_responses    = metrics_ref.gi_responses.load(Ordering::Relaxed);
+                    let gi_responses = metrics_ref.gi_responses.load(Ordering::Relaxed);
 
                     let body = format!(
                         "# HELP iec104bridge_cache_size Number of data points currently cached\n\
@@ -250,7 +268,8 @@ async fn main() -> anyhow::Result<()> {
                     );
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(), body
+                        body.len(),
+                        body
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
                 });
@@ -261,7 +280,14 @@ async fn main() -> anyhow::Result<()> {
     // ── Message source ────────────────────────────────────────────────────────
     let source: Box<dyn MessageSource> = Box::new(NatsSource::from_config(&config).await?);
 
-    run_message_loop(source, server, data_store, Arc::clone(&metrics), config.iec104_default_ca).await;
+    run_message_loop(
+        source,
+        server,
+        data_store,
+        Arc::clone(&metrics),
+        config.iec104_default_ca,
+    )
+    .await;
 
     info!("Bridge stopped");
     Ok(())
@@ -336,4 +362,3 @@ pub async fn run_message_loop(
         }
     }
 }
-

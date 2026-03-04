@@ -54,9 +54,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use anyhow::Context as _;
+use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
-use rustls::ServerConfig;
 use tokio::io::{self, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
@@ -129,8 +129,8 @@ pub struct TlsConfig {
 /// does not match the certificate).
 pub fn build_acceptor(cfg: &TlsConfig) -> anyhow::Result<TlsAcceptor> {
     // ── CA / client-verifier ─────────────────────────────────────────────────
-    let ca_certs = load_certs(Path::new(&cfg.ca_cert_path))
-        .context("Loading TLS CA certificate")?;
+    let ca_certs =
+        load_certs(Path::new(&cfg.ca_cert_path)).context("Loading TLS CA certificate")?;
 
     let mut root_store = rustls::RootCertStore::empty();
     for cert in ca_certs {
@@ -146,11 +146,11 @@ pub fn build_acceptor(cfg: &TlsConfig) -> anyhow::Result<TlsAcceptor> {
         .map_err(|e| anyhow::anyhow!("Failed to build client cert verifier: {e}"))?;
 
     // ── Server certificate + key ──────────────────────────────────────────────
-    let server_certs = load_certs(Path::new(&cfg.cert_path))
-        .context("Loading TLS server certificate")?;
+    let server_certs =
+        load_certs(Path::new(&cfg.cert_path)).context("Loading TLS server certificate")?;
 
-    let server_key = load_private_key(Path::new(&cfg.key_path))
-        .context("Loading TLS server private key")?;
+    let server_key =
+        load_private_key(Path::new(&cfg.key_path)).context("Loading TLS server private key")?;
 
     // ── ServerConfig ──────────────────────────────────────────────────────────
     let server_config = ServerConfig::builder()
@@ -186,7 +186,7 @@ impl AsyncRead for MaybeTlsStream {
     ) -> Poll<io::Result<()>> {
         match &mut *self {
             Self::Plaintext(s) => Pin::new(s).poll_read(cx, buf),
-            Self::Tls(s)       => Pin::new(&mut **s).poll_read(cx, buf),
+            Self::Tls(s) => Pin::new(&mut **s).poll_read(cx, buf),
         }
     }
 }
@@ -199,27 +199,21 @@ impl AsyncWrite for MaybeTlsStream {
     ) -> Poll<io::Result<usize>> {
         match &mut *self {
             Self::Plaintext(s) => Pin::new(s).poll_write(cx, buf),
-            Self::Tls(s)       => Pin::new(&mut **s).poll_write(cx, buf),
+            Self::Tls(s) => Pin::new(&mut **s).poll_write(cx, buf),
         }
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
             Self::Plaintext(s) => Pin::new(s).poll_flush(cx),
-            Self::Tls(s)       => Pin::new(&mut **s).poll_flush(cx),
+            Self::Tls(s) => Pin::new(&mut **s).poll_flush(cx),
         }
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
             Self::Plaintext(s) => Pin::new(s).poll_shutdown(cx),
-            Self::Tls(s)       => Pin::new(&mut **s).poll_shutdown(cx),
+            Self::Tls(s) => Pin::new(&mut **s).poll_shutdown(cx),
         }
     }
 }
@@ -288,13 +282,13 @@ pub fn spawn_tls_proxy(
     tokio::spawn(async move {
         // ── TLS handshake ─────────────────────────────────────────────────────
         let mut tls_stream = match accept_tls(tcp, &acceptor, peer).await {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(_) => return, // error already logged by accept_tls
         };
 
         // ── Connect to lib60870 loopback ──────────────────────────────────────
         let mut local = match TcpStream::connect(iec104_local_addr).await {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(e) => {
                 error!(
                     peer  = %peer,

@@ -30,7 +30,6 @@ pub struct Config {
     /// message (default: `1`)
     pub iec104_default_ca: u16,
 
-
     // ── Observability ─────────────────────────────────────────────────────────
     /// TCP port for the Prometheus metrics HTTP endpoint (default: `9091`).
     ///
@@ -91,16 +90,15 @@ impl Config {
     where
         F: Fn(&str) -> Option<String>,
     {
-        let nats_stream = get("NATS_STREAM")
-            .ok_or_else(|| anyhow::anyhow!("NATS_STREAM must be set"))?;
-        let nats_consumer = get("NATS_CONSUMER")
-            .ok_or_else(|| anyhow::anyhow!("NATS_CONSUMER must be set"))?;
+        let nats_stream =
+            get("NATS_STREAM").ok_or_else(|| anyhow::anyhow!("NATS_STREAM must be set"))?;
+        let nats_consumer =
+            get("NATS_CONSUMER").ok_or_else(|| anyhow::anyhow!("NATS_CONSUMER must be set"))?;
 
         let nats_url = get("NATS_URL").unwrap_or_else(|| "nats://localhost:4222".into());
         let nats_subject_filter = get("NATS_SUBJECT_FILTER");
 
-        let iec104_bind_addr =
-            get("IEC104_BIND_ADDR").unwrap_or_else(|| "0.0.0.0".into());
+        let iec104_bind_addr = get("IEC104_BIND_ADDR").unwrap_or_else(|| "0.0.0.0".into());
         let iec104_port = get("IEC104_PORT")
             .unwrap_or_else(|| "2404".into())
             .parse::<u16>()
@@ -121,8 +119,8 @@ impl Config {
             .map(|v| v == "true" || v == "1" || v == "yes")
             .unwrap_or(false);
 
-        let tls_cert_path    = get("TLS_CERT_PATH");
-        let tls_key_path     = get("TLS_KEY_PATH");
+        let tls_cert_path = get("TLS_CERT_PATH");
+        let tls_key_path = get("TLS_KEY_PATH");
         let tls_ca_cert_path = get("TLS_CA_CERT_PATH");
 
         let tls_port = get("TLS_PORT")
@@ -164,8 +162,8 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use super::Config;
+    use std::collections::HashMap;
 
     /// Build a Config from a static key–value map.
     fn from_map(map: &HashMap<&str, &str>) -> anyhow::Result<Config> {
@@ -350,8 +348,8 @@ mod tests {
         map.insert("TLS_CA_CERT_PATH", "/ca.pem");
         let cfg = from_map(&map).unwrap();
         assert!(cfg.tls_enabled);
-        assert_eq!(cfg.tls_cert_path,    Some("/cert.pem".into()));
-        assert_eq!(cfg.tls_key_path,     Some("/key.pem".into()));
+        assert_eq!(cfg.tls_cert_path, Some("/cert.pem".into()));
+        assert_eq!(cfg.tls_key_path, Some("/key.pem".into()));
         assert_eq!(cfg.tls_ca_cert_path, Some("/ca.pem".into()));
     }
 
@@ -361,10 +359,13 @@ mod tests {
             let mut map = required();
             map.insert("TLS_ENABLED", val);
             map.insert("TLS_CERT_PATH", "/c.pem");
-            map.insert("TLS_KEY_PATH",  "/k.pem");
+            map.insert("TLS_KEY_PATH", "/k.pem");
             map.insert("TLS_CA_CERT_PATH", "/ca.pem");
             let cfg = from_map(&map).unwrap();
-            assert!(cfg.tls_enabled, "Expected tls_enabled=true for TLS_ENABLED={val}");
+            assert!(
+                cfg.tls_enabled,
+                "Expected tls_enabled=true for TLS_ENABLED={val}"
+            );
         }
     }
 
@@ -376,4 +377,3 @@ mod tests {
         assert_eq!(cfg.tls_port, 8883);
     }
 }
-
