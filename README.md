@@ -493,28 +493,24 @@ Decide what happens when the upstream publisher reports degraded quality:
 
 ### 3 — Pre-deployment checklist
 
-```
-[ ] IEC-104 bind address and port confirmed, firewall rule open
-[ ] Common Address(es) agreed and match SCADA configuration
-[ ] IOA register complete and reviewed by SCADA team
-[ ] Type IDs and scaling factors agreed for all scaled signals
-[ ] NATS cluster URLs, stream name, consumer name, and credentials supplied
-[ ] NATS subject naming convention agreed and applied to publisher
-[ ] Quality propagation policy documented
-[ ] Bridge environment variables written and reviewed (see Configuration table)
-[ ] End-to-end test: publish one message per Type ID, confirm SCADA receives it
-[ ] GI test: trigger General Interrogation, confirm all cached points returned
-[ ] Failover test: disconnect and reconnect NATS; confirm bridge recovers
+- [ ] IEC-104 bind address and port confirmed, firewall rule open
+- [ ] Common Address(es) agreed and match SCADA configuration
+- [ ] IOA register complete and reviewed by SCADA team
+- [ ] Type IDs and scaling factors agreed for all scaled signals
+- [ ] NATS cluster URLs, stream name, consumer name, and credentials supplied
+- [ ] NATS subject naming convention agreed and applied to publisher
+- [ ] Quality propagation policy documented
+- [ ] Bridge environment variables written and reviewed (see Configuration table)
+- [ ] End-to-end test: publish one message per Type ID, confirm SCADA receives it
+- [ ] GI test: trigger General Interrogation, confirm all cached points returned
+- [ ] Failover test: disconnect and reconnect NATS; confirm bridge recovers
 
-# If TLS / IEC 62351-3 is required:
-[ ] Root CA certificate obtained and trusted by both bridge and SCADA master
-[ ] Server certificate and private key issued, signed by Root CA
-[ ] Client certificate(s) issued for each SCADA master, signed by Root CA
-[ ] TLS_ENABLED=true and all three TLS_*_PATH vars set in bridge config
-[ ] Firewall permits TCP on TLS_PORT (default 19998) from master IP(s)
-[ ] Handshake test: connect a test client with the client cert, confirm bridge logs
-  "TLS handshake completed – client certificate accepted"
-[ ] Rejection test: connect without a client cert, confirm bridge logs
-  "TLS handshake failed – connection dropped"
-[ ] Certificate expiry dates recorded; renewal procedure agreed
-```
+#### If TLS / IEC 62351-3 is required:
+- [ ] Root CA certificate obtained and trusted by both bridge and SCADA master
+- [ ] Server certificate and private key issued, signed by Root CA
+- [ ] Client certificate(s) issued for each SCADA master, signed by Root CA
+- [ ] TLS_ENABLED=true and all three TLS_*_PATH vars set in bridge config
+- [ ] Firewall permits TCP on TLS_PORT (default 19998) from master IP(s)
+- [ ] Handshake test: connect a test client with the client cert, confirm bridge logs.
+- [ ] Rejection test: connect without a client cert, confirm bridge logs
+- [ ] Certificate expiry dates recorded; renewal procedure agreed
