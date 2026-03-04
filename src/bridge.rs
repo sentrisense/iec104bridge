@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn infer_type_float_yields_measured_float() {
-        let msg = make_msg(1, DataValue::Number(3.14), None, QualityField::Good, CotField::Spontaneous, None);
+        let msg = make_msg(1, DataValue::Number(1.5), None, QualityField::Good, CotField::Spontaneous, None);
         let sink = CapturingSink::default();
         dispatch(&sink, &msg, 1);
         let calls = sink.calls.borrow();

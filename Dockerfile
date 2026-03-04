@@ -36,13 +36,23 @@ COPY src/ src/
 # Touch main.rs so cargo knows it changed (avoids the "nothing to compile" cache hit).
 RUN touch src/main.rs && cargo build --release
 
-# ─── Stage 2 – minimal runtime ────────────────────────────────────────────────
-FROM debian:trixie-slim AS runtime
+# ─── Stage 2 – distroless runtime ───────────────────────────────────────────
+# gcr.io/distroless/cc-debian13 contains only glibc + libstdc++ — no shell,
+# no package manager, no utilities.  This gives the smallest possible attack
+# surface and eliminates the vast majority of OS-level CVEs found in
+# general-purpose base images.
+#
+# Debian 13 (Trixie) matches rust:1's base, so the glibc versions align
+# without any pinning.
+#
+# CA certificates are bundled in the distroless image, so TLS (IEC 62351-3)
+# works without any extra installation.
+FROM gcr.io/distroless/cc-debian13 AS runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-    && rm -rf /var/lib/apt/lists/*
+# Copy a fully-static wget from busybox so Docker healthchecks work without a
+# shell.  busybox:musl links against musl libc statically, so no additional
+# shared libraries are needed in the distroless image.
+COPY --from=busybox:stable-musl /bin/wget /usr/local/bin/wget
 
 WORKDIR /app
 
@@ -58,5 +68,6 @@ ENV INPUT_FILE=/app/examples/messages.jsonl \
     RUST_LOG=iec104bridge=info
 
 EXPOSE 2404
+EXPOSE 19998
 
 ENTRYPOINT ["/usr/local/bin/iec104bridge"]

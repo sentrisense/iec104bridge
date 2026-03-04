@@ -173,7 +173,9 @@ pub enum MaybeTlsStream {
     /// Plain TCP — TLS disabled (plaintext mode, port 2404).
     Plaintext(TcpStream),
     /// TLS-wrapped TCP — mTLS mode (port 19998).
-    Tls(tokio_rustls::server::TlsStream<TcpStream>),
+    ///
+    /// Boxed to avoid a large stack-size difference between variants.
+    Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
 }
 
 impl AsyncRead for MaybeTlsStream {
@@ -184,7 +186,7 @@ impl AsyncRead for MaybeTlsStream {
     ) -> Poll<io::Result<()>> {
         match &mut *self {
             Self::Plaintext(s) => Pin::new(s).poll_read(cx, buf),
-            Self::Tls(s)       => Pin::new(s).poll_read(cx, buf),
+            Self::Tls(s)       => Pin::new(&mut **s).poll_read(cx, buf),
         }
     }
 }
@@ -197,7 +199,7 @@ impl AsyncWrite for MaybeTlsStream {
     ) -> Poll<io::Result<usize>> {
         match &mut *self {
             Self::Plaintext(s) => Pin::new(s).poll_write(cx, buf),
-            Self::Tls(s)       => Pin::new(s).poll_write(cx, buf),
+            Self::Tls(s)       => Pin::new(&mut **s).poll_write(cx, buf),
         }
     }
 
@@ -207,7 +209,7 @@ impl AsyncWrite for MaybeTlsStream {
     ) -> Poll<io::Result<()>> {
         match &mut *self {
             Self::Plaintext(s) => Pin::new(s).poll_flush(cx),
-            Self::Tls(s)       => Pin::new(s).poll_flush(cx),
+            Self::Tls(s)       => Pin::new(&mut **s).poll_flush(cx),
         }
     }
 
@@ -217,7 +219,7 @@ impl AsyncWrite for MaybeTlsStream {
     ) -> Poll<io::Result<()>> {
         match &mut *self {
             Self::Plaintext(s) => Pin::new(s).poll_shutdown(cx),
-            Self::Tls(s)       => Pin::new(s).poll_shutdown(cx),
+            Self::Tls(s)       => Pin::new(&mut **s).poll_shutdown(cx),
         }
     }
 }
@@ -265,7 +267,7 @@ pub async fn accept_tls(
         "TLS handshake completed – client certificate accepted"
     );
 
-    Ok(MaybeTlsStream::Tls(tls))
+    Ok(MaybeTlsStream::Tls(Box::new(tls)))
 }
 
 // ─── TLS proxy ────────────────────────────────────────────────────────────────

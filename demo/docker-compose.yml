@@ -77,7 +77,7 @@ services:
       METRICS_PORT: "9091"
       RUST_LOG: iec104bridge=info
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9091/metrics"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:9091/metrics"]
       interval: 5s
       timeout: 3s
       retries: 12
