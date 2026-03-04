@@ -128,9 +128,23 @@ impl NatsSource {
         // A comma-separated string (common in docker-compose env vars) must be
         // split before being passed; passing the raw string causes a parse error.
         let urls: Vec<&str> = config.nats_url.split(',').map(str::trim).collect();
-        let client = async_nats::connect(urls.as_slice()).await.map_err(|e| {
-            anyhow::anyhow!("Failed to connect to NATS at {}: {e}", config.nats_url)
-        })?;
+        let client = if let Some(ref creds_path) = config.nats_credentials_path {
+            info!(path = %creds_path, "Authenticating with NATS credentials file");
+            async_nats::ConnectOptions::with_credentials_file(creds_path)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to load NATS credentials from '{creds_path}': {e}")
+                })?
+                .connect(urls.as_slice())
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to connect to NATS at {}: {e}", config.nats_url)
+                })?
+        } else {
+            async_nats::connect(urls.as_slice()).await.map_err(|e| {
+                anyhow::anyhow!("Failed to connect to NATS at {}: {e}", config.nats_url)
+            })?
+        };
 
         info!("Connected to NATS");
 

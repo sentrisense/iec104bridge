@@ -5,7 +5,7 @@ license = "GPL-3.0-or-later"
 edition = "2024"
 
 [dependencies]
-async-nats = "0.46"
+async-nats = { version = "0.46", features = ["nkeys"] }
 lib60870 = "0.4"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
