@@ -8,14 +8,43 @@
 
 use std::env;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputTransport {
+    Nats,
+    UnixSocket,
+}
+
+impl InputTransport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Nats => "nats",
+            Self::UnixSocket => "unix_socket",
+        }
+    }
+
+    fn parse(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "nats" => Ok(Self::Nats),
+            "unix_socket" => Ok(Self::UnixSocket),
+            other => Err(anyhow::anyhow!(
+                "INPUT_TRANSPORT must be one of: nats, unix_socket (got '{other}')"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
+    // ── Input transport ────────────────────────────────────────────────────────
+    /// Upstream message transport used to feed the bridge.
+    pub input_transport: InputTransport,
+
     // ── NATS ──────────────────────────────────────────────────────────────────
-    /// NATS server URL (default: `nats://localhost:4222`)
+    /// NATS server URL (default: `nats://localhost:4222`). Used only in NATS mode.
     pub nats_url: String,
-    /// JetStream stream to subscribe to (required)
+    /// JetStream stream to subscribe to (required in NATS mode).
     pub nats_stream: String,
-    /// Durable consumer name on that stream (required)
+    /// Durable consumer name on that stream (required in NATS mode).
     pub nats_consumer: String,
     /// Optional subject filter applied at subscription time.
     /// When set, only messages published on this subject are processed.
@@ -28,6 +57,16 @@ pub struct Config {
     ///
     /// Set via `NATS_CREDENTIALS`.
     pub nats_credentials_path: Option<String>,
+
+    // ── Unix socket input ─────────────────────────────────────────────────────
+    /// Filesystem path for the local Unix domain socket listener.
+    pub unix_socket_path: String,
+    /// Optional effective UID allowed to connect to the Unix socket.
+    pub unix_socket_allowed_uid: Option<u32>,
+    /// Optional effective GID allowed to connect to the Unix socket.
+    pub unix_socket_allowed_gid: Option<u32>,
+    /// Maximum request line size accepted from the Unix socket transport.
+    pub unix_socket_max_line_bytes: usize,
 
     // ── IEC-104 server ────────────────────────────────────────────────────────
     /// Network address for the IEC-104 server to bind on (default: `0.0.0.0`)
@@ -74,11 +113,24 @@ pub struct Config {
     pub tls_port: u16,
 }
 
+type NatsConfigParts = (String, String, String, Option<String>, Option<String>);
+type UnixSocketConfigParts = (String, Option<u32>, Option<u32>, usize);
+type ServerConfigParts = (String, u16, u16, u16);
+type TlsConfigParts = (bool, Option<String>, Option<String>, Option<String>, u16);
+
+struct ConfigParts {
+    input_transport: InputTransport,
+    nats: NatsConfigParts,
+    unix_socket: UnixSocketConfigParts,
+    server: ServerConfigParts,
+    tls: TlsConfigParts,
+}
+
 impl Config {
     /// Build a [`Config`] by reading environment variables.
     ///
     /// # Errors
-    /// Returns an error if `NATS_STREAM` or `NATS_CONSUMER` are not set.
+    /// Returns an error if required variables for the selected transport are missing.
     pub fn from_env() -> anyhow::Result<Self> {
         Self::from_lookup(|key| env::var(key).ok())
     }
@@ -92,69 +144,35 @@ impl Config {
     /// [`Self::from_env`] which delegates here with the real environment.
     ///
     /// # Errors
-    /// Returns an error if `NATS_STREAM` or `NATS_CONSUMER` are absent, or if
-    /// `IEC104_PORT` / `IEC104_CA` cannot be parsed as `u16`.
+    /// Returns an error if required settings for the selected transport are absent,
+    /// or if numeric configuration values cannot be parsed.
     pub fn from_lookup<F>(get: F) -> anyhow::Result<Self>
     where
         F: Fn(&str) -> Option<String>,
     {
-        let nats_stream =
-            get("NATS_STREAM").ok_or_else(|| anyhow::anyhow!("NATS_STREAM must be set"))?;
-        let nats_consumer =
-            get("NATS_CONSUMER").ok_or_else(|| anyhow::anyhow!("NATS_CONSUMER must be set"))?;
-
-        let nats_url = get("NATS_URL").unwrap_or_else(|| "nats://localhost:4222".into());
-        let nats_subject_filter = get("NATS_SUBJECT_FILTER");
-        let nats_credentials_path = get("NATS_CREDENTIALS");
-
-        let iec104_bind_addr = get("IEC104_BIND_ADDR").unwrap_or_else(|| "0.0.0.0".into());
-        let iec104_port = get("IEC104_PORT")
-            .unwrap_or_else(|| "2404".into())
-            .parse::<u16>()
-            .map_err(|_| anyhow::anyhow!("IEC104_PORT must be a valid u16"))?;
-        let iec104_default_ca = get("IEC104_CA")
-            .unwrap_or_else(|| "1".into())
-            .parse::<u16>()
-            .map_err(|_| anyhow::anyhow!("IEC104_CA must be a valid u16"))?;
-
-        let metrics_port = get("METRICS_PORT")
-            .unwrap_or_else(|| "9091".into())
-            .parse::<u16>()
-            .map_err(|_| anyhow::anyhow!("METRICS_PORT must be a valid u16"))?;
-
-        // ── TLS / IEC 62351-3 ────────────────────────────────────────────────
-        let tls_enabled = get("TLS_ENABLED")
-            .map(|v| v.to_lowercase())
-            .map(|v| v == "true" || v == "1" || v == "yes")
-            .unwrap_or(false);
-
-        let tls_cert_path = get("TLS_CERT_PATH");
-        let tls_key_path = get("TLS_KEY_PATH");
-        let tls_ca_cert_path = get("TLS_CA_CERT_PATH");
-
-        let tls_port = get("TLS_PORT")
-            .unwrap_or_else(|| "19998".into())
-            .parse::<u16>()
-            .map_err(|_| anyhow::anyhow!("TLS_PORT must be a valid u16"))?;
-
-        if tls_enabled {
-            if tls_cert_path.is_none() {
-                anyhow::bail!("TLS_CERT_PATH must be set when TLS_ENABLED=true");
-            }
-            if tls_key_path.is_none() {
-                anyhow::bail!("TLS_KEY_PATH must be set when TLS_ENABLED=true");
-            }
-            if tls_ca_cert_path.is_none() {
-                anyhow::bail!("TLS_CA_CERT_PATH must be set when TLS_ENABLED=true");
-            }
-        }
+        let parts = Self::load_config_parts(&get)?;
+        let (nats_url, nats_stream, nats_consumer, nats_subject_filter, nats_credentials_path) =
+            parts.nats;
+        let (
+            unix_socket_path,
+            unix_socket_allowed_uid,
+            unix_socket_allowed_gid,
+            unix_socket_max_line_bytes,
+        ) = parts.unix_socket;
+        let (iec104_bind_addr, iec104_port, iec104_default_ca, metrics_port) = parts.server;
+        let (tls_enabled, tls_cert_path, tls_key_path, tls_ca_cert_path, tls_port) = parts.tls;
 
         Ok(Self {
+            input_transport: parts.input_transport,
             nats_url,
             nats_stream,
             nats_consumer,
             nats_subject_filter,
             nats_credentials_path,
+            unix_socket_path,
+            unix_socket_allowed_uid,
+            unix_socket_allowed_gid,
+            unix_socket_max_line_bytes,
             iec104_bind_addr,
             iec104_port,
             iec104_default_ca,
@@ -166,13 +184,200 @@ impl Config {
             tls_port,
         })
     }
+
+    fn load_config_parts<F>(get: &F) -> anyhow::Result<ConfigParts>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let input_transport = Self::load_input_transport(get)?;
+
+        Ok(ConfigParts {
+            input_transport,
+            nats: Self::load_nats_config(get, input_transport)?,
+            unix_socket: Self::load_unix_socket_config(get)?,
+            server: Self::load_server_config(get)?,
+            tls: Self::load_tls_config(get)?,
+        })
+    }
+
+    fn load_input_transport<F>(get: &F) -> anyhow::Result<InputTransport>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        InputTransport::parse(&get("INPUT_TRANSPORT").unwrap_or_else(|| "nats".into()))
+    }
+
+    fn load_nats_config<F>(
+        get: &F,
+        input_transport: InputTransport,
+    ) -> anyhow::Result<NatsConfigParts>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let nats_url = get("NATS_URL").unwrap_or_else(|| "nats://localhost:4222".into());
+        let (nats_stream, nats_consumer) = Self::load_nats_consumer_parts(get, input_transport)?;
+
+        Ok((
+            nats_url,
+            nats_stream,
+            nats_consumer,
+            get("NATS_SUBJECT_FILTER"),
+            get("NATS_CREDENTIALS"),
+        ))
+    }
+
+    fn load_nats_consumer_parts<F>(
+        get: &F,
+        input_transport: InputTransport,
+    ) -> anyhow::Result<(String, String)>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        match input_transport {
+            InputTransport::Nats => Ok((
+                Self::required(get, "NATS_STREAM")?,
+                Self::required(get, "NATS_CONSUMER")?,
+            )),
+            InputTransport::UnixSocket => Ok((String::new(), String::new())),
+        }
+    }
+
+    fn load_unix_socket_config<F>(get: &F) -> anyhow::Result<UnixSocketConfigParts>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let unix_socket_max_line_bytes = Self::load_unix_socket_max_line_bytes(get)?;
+
+        Ok((
+            get("UNIX_SOCKET_PATH").unwrap_or_else(|| "/run/iec104bridge/input.sock".into()),
+            Self::parse_optional(get, "UNIX_SOCKET_ALLOWED_UID")?,
+            Self::parse_optional(get, "UNIX_SOCKET_ALLOWED_GID")?,
+            unix_socket_max_line_bytes,
+        ))
+    }
+
+    fn load_unix_socket_max_line_bytes<F>(get: &F) -> anyhow::Result<usize>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let max_line_bytes = Self::parse_with_default(get, "UNIX_SOCKET_MAX_LINE_BYTES", "65536")?;
+        if max_line_bytes == 0 {
+            anyhow::bail!("UNIX_SOCKET_MAX_LINE_BYTES must be greater than zero");
+        }
+
+        Ok(max_line_bytes)
+    }
+
+    fn load_server_config<F>(get: &F) -> anyhow::Result<ServerConfigParts>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        Ok((
+            get("IEC104_BIND_ADDR").unwrap_or_else(|| "0.0.0.0".into()),
+            Self::parse_with_default(get, "IEC104_PORT", "2404")?,
+            Self::parse_with_default(get, "IEC104_CA", "1")?,
+            Self::parse_with_default(get, "METRICS_PORT", "9091")?,
+        ))
+    }
+
+    fn load_tls_config<F>(get: &F) -> anyhow::Result<TlsConfigParts>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let tls_enabled = Self::is_truthy(get("TLS_ENABLED"));
+        let tls_cert_path = get("TLS_CERT_PATH");
+        let tls_key_path = get("TLS_KEY_PATH");
+        let tls_ca_cert_path = get("TLS_CA_CERT_PATH");
+
+        Self::validate_tls_paths(
+            tls_enabled,
+            &tls_cert_path,
+            &tls_key_path,
+            &tls_ca_cert_path,
+        )?;
+
+        Ok((
+            tls_enabled,
+            tls_cert_path,
+            tls_key_path,
+            tls_ca_cert_path,
+            Self::parse_with_default(get, "TLS_PORT", "19998")?,
+        ))
+    }
+
+    fn required<F>(get: &F, key: &str) -> anyhow::Result<String>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        get(key).ok_or_else(|| anyhow::anyhow!("{key} must be set"))
+    }
+
+    fn require_present(value: &Option<String>, key: &str) -> anyhow::Result<()> {
+        if value.is_none() {
+            anyhow::bail!("{key} must be set when TLS_ENABLED=true");
+        }
+        Ok(())
+    }
+
+    fn validate_tls_paths(
+        tls_enabled: bool,
+        tls_cert_path: &Option<String>,
+        tls_key_path: &Option<String>,
+        tls_ca_cert_path: &Option<String>,
+    ) -> anyhow::Result<()> {
+        if !tls_enabled {
+            return Ok(());
+        }
+
+        for (value, key) in [
+            (tls_cert_path, "TLS_CERT_PATH"),
+            (tls_key_path, "TLS_KEY_PATH"),
+            (tls_ca_cert_path, "TLS_CA_CERT_PATH"),
+        ] {
+            Self::require_present(value, key)?;
+        }
+
+        Ok(())
+    }
+
+    fn is_truthy(value: Option<String>) -> bool {
+        value
+            .map(|v| v.to_lowercase())
+            .map(|v| v == "true" || v == "1" || v == "yes")
+            .unwrap_or(false)
+    }
+
+    fn parse_optional<F, T>(get: &F, key: &str) -> anyhow::Result<Option<T>>
+    where
+        F: Fn(&str) -> Option<String>,
+        T: std::str::FromStr,
+    {
+        get(key)
+            .map(|value| {
+                value.parse::<T>().map_err(|_| {
+                    anyhow::anyhow!("{key} must be a valid {}", std::any::type_name::<T>())
+                })
+            })
+            .transpose()
+    }
+
+    fn parse_with_default<F, T>(get: &F, key: &str, default: &str) -> anyhow::Result<T>
+    where
+        F: Fn(&str) -> Option<String>,
+        T: std::str::FromStr,
+    {
+        get(key)
+            .unwrap_or_else(|| default.into())
+            .parse::<T>()
+            .map_err(|_| anyhow::anyhow!("{key} must be a valid {}", std::any::type_name::<T>()))
+    }
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, InputTransport};
     use std::collections::HashMap;
 
     /// Build a Config from a static key–value map.
@@ -212,6 +417,12 @@ mod tests {
     }
 
     #[test]
+    fn default_input_transport_is_nats() {
+        let cfg = from_map(&required()).unwrap();
+        assert_eq!(cfg.input_transport, InputTransport::Nats);
+    }
+
+    #[test]
     fn default_iec104_port() {
         let cfg = from_map(&required()).unwrap();
         assert_eq!(cfg.iec104_port, 2404);
@@ -233,6 +444,15 @@ mod tests {
     fn default_subject_filter_is_none() {
         let cfg = from_map(&required()).unwrap();
         assert_eq!(cfg.nats_subject_filter, None);
+    }
+
+    #[test]
+    fn default_unix_socket_settings() {
+        let cfg = from_map(&required()).unwrap();
+        assert_eq!(cfg.unix_socket_path, "/run/iec104bridge/input.sock");
+        assert_eq!(cfg.unix_socket_allowed_uid, None);
+        assert_eq!(cfg.unix_socket_allowed_gid, None);
+        assert_eq!(cfg.unix_socket_max_line_bytes, 65_536);
     }
 
     // ── overrides ─────────────────────────────────────────────────────────────
@@ -277,12 +497,61 @@ mod tests {
         assert_eq!(cfg.iec104_bind_addr, "127.0.0.1");
     }
 
+    #[test]
+    fn unix_socket_transport_does_not_require_nats_settings() {
+        let mut map = HashMap::new();
+        map.insert("INPUT_TRANSPORT", "unix_socket");
+        let cfg = from_map(&map).unwrap();
+        assert_eq!(cfg.input_transport, InputTransport::UnixSocket);
+        assert_eq!(cfg.nats_stream, "");
+        assert_eq!(cfg.nats_consumer, "");
+    }
+
+    #[test]
+    fn custom_unix_socket_settings() {
+        let mut map = HashMap::new();
+        map.insert("INPUT_TRANSPORT", "unix_socket");
+        map.insert("UNIX_SOCKET_PATH", "/tmp/test.sock");
+        map.insert("UNIX_SOCKET_ALLOWED_UID", "123");
+        map.insert("UNIX_SOCKET_ALLOWED_GID", "456");
+        map.insert("UNIX_SOCKET_MAX_LINE_BYTES", "4096");
+
+        let cfg = from_map(&map).unwrap();
+        assert_eq!(cfg.unix_socket_path, "/tmp/test.sock");
+        assert_eq!(cfg.unix_socket_allowed_uid, Some(123));
+        assert_eq!(cfg.unix_socket_allowed_gid, Some(456));
+        assert_eq!(cfg.unix_socket_max_line_bytes, 4096);
+    }
+
     // ── parse errors ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn invalid_input_transport_is_error() {
+        let mut map = required();
+        map.insert("INPUT_TRANSPORT", "redis");
+        assert!(from_map(&map).is_err());
+    }
 
     #[test]
     fn invalid_port_is_error() {
         let mut map = required();
         map.insert("IEC104_PORT", "not_a_number");
+        assert!(from_map(&map).is_err());
+    }
+
+    #[test]
+    fn invalid_unix_socket_uid_is_error() {
+        let mut map = HashMap::new();
+        map.insert("INPUT_TRANSPORT", "unix_socket");
+        map.insert("UNIX_SOCKET_ALLOWED_UID", "abc");
+        assert!(from_map(&map).is_err());
+    }
+
+    #[test]
+    fn zero_unix_socket_max_line_bytes_is_error() {
+        let mut map = HashMap::new();
+        map.insert("INPUT_TRANSPORT", "unix_socket");
+        map.insert("UNIX_SOCKET_MAX_LINE_BYTES", "0");
         assert!(from_map(&map).is_err());
     }
 

@@ -696,6 +696,7 @@ dependencies = [
  "async-nats",
  "futures",
  "lib60870",
+ "libc",
  "rustls",
  "rustls-pemfile",
  "serde",
@@ -703,6 +704,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "tokio-stream",
  "tracing",
  "tracing-subscriber",
 ]

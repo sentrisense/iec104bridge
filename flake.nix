@@ -26,6 +26,57 @@
         # Use a single LLVM version across clang, libclang and compiler-rt
         # so that the headers that bindgen sees match the compiler being used.
         llvm = pkgs.llvmPackages_latest;
+
+        cargoCrap =
+          let
+            version = "0.2.2";
+            assets = {
+              x86_64-linux = {
+                archive = "cargo-crap-x86_64-unknown-linux-gnu.tar.gz";
+                hash = "sha256-vdcnvjpTCwEO60dYFVAmWG0rJuvjMpAmqK7BsBCjhp0=";
+              };
+              aarch64-linux = {
+                archive = "cargo-crap-aarch64-unknown-linux-gnu.tar.gz";
+                hash = "sha256-pznYBvqPXc/560N8viGbRdp6HZAWdR+kfjSrR6wluIE=";
+              };
+              x86_64-darwin = {
+                archive = "cargo-crap-x86_64-apple-darwin.tar.gz";
+                hash = "sha256-ruF2a3nE9l78+NLYDD+rrt9fyO6C4uHk+qVwFe6lyro=";
+              };
+              aarch64-darwin = {
+                archive = "cargo-crap-aarch64-apple-darwin.tar.gz";
+                hash = "sha256-SRIYiphTQRcZ9VkHubp5UcdTm/O9mRViXdcWa6ryNuY=";
+              };
+            };
+            asset = assets.${system} or null;
+          in
+          if asset == null then null else pkgs.stdenvNoCC.mkDerivation {
+            pname = "cargo-crap";
+            inherit version;
+
+            src = pkgs.fetchurl {
+              url = "https://github.com/minikin/cargo-crap/releases/download/v${version}/${asset.archive}";
+              hash = asset.hash;
+            };
+
+            dontUnpack = true;
+            nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+            buildInputs = [ pkgs.stdenv.cc.cc.lib ];
+
+            installPhase = ''
+              runHook preInstall
+              tar -xzf "$src"
+              install -Dm755 cargo-crap "$out/bin/cargo-crap"
+              runHook postInstall
+            '';
+
+            meta = {
+              description = "CRAP metric reporting for Rust codebases";
+              homepage = "https://github.com/minikin/cargo-crap";
+              license = pkgs.lib.licenses.mit;
+              platforms = builtins.attrNames assets;
+            };
+          };
       in
       {
         devShells.default = pkgs.mkShell {
@@ -52,6 +103,8 @@
               nats-py              # async NATS / JetStream client
               influxdb-client      # InfluxDB v2 write API
             ]))
+          ] ++ pkgs.lib.optionals (cargoCrap != null) [
+            cargoCrap
           ];
 
           # ── bindgen environment ───────────────────────────────────

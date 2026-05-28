@@ -41,6 +41,10 @@ docker compose up --build
 Open **http://localhost:3000** → dashboards → **DLR – Dynamic Line Rating Demo**.
 No login required (anonymous viewer access is enabled).
 
+This demo remains intentionally NATS-based. The new `INPUT_TRANSPORT=unix_socket`
+mode is aimed at single-host deployments where a companion process pushes values
+directly into the bridge without running a broker.
+
 | Service             | URL                             | Notes                              |
 |---------------------|---------------------------------|------------------------------------|
 | Grafana             | http://localhost:3000           | admin / admin for edit access      |
@@ -146,6 +150,7 @@ or sensor faults that appear and clear without operator intervention.
 | `NATS_STREAM`         | —       | JetStream stream name                |
 | `NATS_CONSUMER`       | —       | Durable consumer name                |
 | `NATS_SUBJECT_FILTER` | —       | Optional subject filter              |
+| `INPUT_TRANSPORT`     | `nats`  | Keep this demo on NATS input         |
 | `IEC104_PORT`         | 2404    | IEC-104 TCP listen port              |
 | `IEC104_CA`           | 1       | Default Common Address               |
 | `METRICS_PORT`        | 9091    | Prometheus metrics HTTP port         |

@@ -100,30 +100,34 @@ impl DataSink for LiveSink<'_> {
 
 // ─── quality mapping ──────────────────────────────────────────────────────────
 
+const QUALITY_MAP: [Quality; 6] = [
+    Quality::GOOD,
+    Quality::INVALID,
+    Quality::NOT_TOPICAL,
+    Quality::SUBSTITUTED,
+    Quality::BLOCKED,
+    Quality::OVERFLOW,
+];
+
+const COT_MAP: [CauseOfTransmission; 6] = [
+    CauseOfTransmission::Spontaneous,
+    CauseOfTransmission::Periodic,
+    CauseOfTransmission::Background,
+    CauseOfTransmission::InterrogatedByStation,
+    CauseOfTransmission::ReturnRemote,
+    CauseOfTransmission::ReturnLocal,
+];
+
 /// Convert a JSON-friendly [`QualityField`] to a [`Quality`] bitflag value.
 pub fn map_quality(q: QualityField) -> Quality {
-    match q {
-        QualityField::Good => Quality::GOOD,
-        QualityField::Invalid => Quality::INVALID,
-        QualityField::NotTopical => Quality::NOT_TOPICAL,
-        QualityField::Substituted => Quality::SUBSTITUTED,
-        QualityField::Blocked => Quality::BLOCKED,
-        QualityField::Overflow => Quality::OVERFLOW,
-    }
+    QUALITY_MAP[q as usize]
 }
 
 // ─── cause-of-transmission mapping ───────────────────────────────────────────
 
 /// Convert a JSON-friendly [`CotField`] to a [`CauseOfTransmission`].
 pub fn map_cot(cot: CotField) -> CauseOfTransmission {
-    match cot {
-        CotField::Spontaneous => CauseOfTransmission::Spontaneous,
-        CotField::Periodic => CauseOfTransmission::Periodic,
-        CotField::BackgroundScan => CauseOfTransmission::Background,
-        CotField::Interrogated => CauseOfTransmission::InterrogatedByStation,
-        CotField::ReturnInfoRemote => CauseOfTransmission::ReturnRemote,
-        CotField::ReturnInfoLocal => CauseOfTransmission::ReturnLocal,
-    }
+    COT_MAP[cot as usize]
 }
 
 // ─── type inference ───────────────────────────────────────────────────────────
@@ -138,14 +142,13 @@ pub fn map_cot(cot: CotField) -> CauseOfTransmission {
 fn infer_type(value: &DataValue) -> DataType {
     match value {
         DataValue::Bool(_) => DataType::SinglePoint,
-        DataValue::Number(n) => {
-            if n.fract() == 0.0 && *n >= i16::MIN as f64 && *n <= i16::MAX as f64 {
-                DataType::Scaled
-            } else {
-                DataType::Float
-            }
-        }
+        DataValue::Number(n) if is_scaled_number(*n) => DataType::Scaled,
+        DataValue::Number(_) => DataType::Float,
     }
+}
+
+fn is_scaled_number(value: f64) -> bool {
+    value.fract() == 0.0 && value >= i16::MIN as f64 && value <= i16::MAX as f64
 }
 
 // ─── dispatch ─────────────────────────────────────────────────────────────────
@@ -157,66 +160,114 @@ fn infer_type(value: &DataValue) -> DataType {
 ///
 /// The `default_ca` is used when the message does not include a `ca` field.
 pub fn dispatch<S: DataSink>(sink: &S, msg: &Iec104Message, default_ca: u16) {
-    let ca = msg.ca.unwrap_or(default_ca);
-    let ioa = msg.ioa;
-    let quality = map_quality(msg.quality);
-    let cot = map_cot(msg.cot);
-    let data_type = msg.data_type.unwrap_or_else(|| infer_type(&msg.value));
+    let context = DispatchContext::from_message(msg, default_ca);
 
     debug!(
-        ioa,
-        ca,
-        ?data_type,
-        ?cot,
-        ?quality,
+        ioa = context.ioa,
+        ca = context.ca,
+        ?context.data_type,
+        ?context.cot,
+        ?context.quality,
         "dispatching IEC-104 message"
     );
 
-    match (data_type, &msg.value) {
-        // ── SinglePoint ───────────────────────────────────────────────────────
-        (DataType::SinglePoint, DataValue::Bool(v)) => {
-            sink.send_single_point(cot, ca, ioa, *v, quality);
-        }
-        (DataType::SinglePoint, DataValue::Number(n)) => {
-            // Treat any non-zero number as ON.
-            sink.send_single_point(cot, ca, ioa, *n != 0.0, quality);
-        }
+    match context.data_type {
+        DataType::SinglePoint => dispatch_single_point(sink, &context, &msg.value),
+        DataType::Float | DataType::Normalized => dispatch_float_like(sink, &context, &msg.value),
+        DataType::Scaled => dispatch_scaled(sink, &context, &msg.value),
+        DataType::DoublePoint => dispatch_double_point(sink, &context, &msg.value),
+    }
+}
 
-        // ── Float / Normalised (both use the same floating-point ASDU type) ──
-        (DataType::Float | DataType::Normalized, DataValue::Number(n)) => {
-            sink.send_measured_float(cot, ca, ioa, *n as f32, quality);
-        }
-        (DataType::Float | DataType::Normalized, DataValue::Bool(b)) => {
-            sink.send_measured_float(cot, ca, ioa, if *b { 1.0 } else { 0.0 }, quality);
-        }
+struct DispatchContext {
+    ca: u16,
+    ioa: u32,
+    quality: Quality,
+    cot: CauseOfTransmission,
+    data_type: DataType,
+}
 
-        // ── Scaled ────────────────────────────────────────────────────────────
-        (DataType::Scaled, DataValue::Number(n)) => {
-            // Saturate to i16 range.
-            let v = n.clamp(i16::MIN as f64, i16::MAX as f64) as i16;
-            sink.send_measured_scaled(cot, ca, ioa, v, quality);
+impl DispatchContext {
+    fn from_message(msg: &Iec104Message, default_ca: u16) -> Self {
+        Self {
+            ca: msg.ca.unwrap_or(default_ca),
+            ioa: msg.ioa,
+            quality: map_quality(msg.quality),
+            cot: map_cot(msg.cot),
+            data_type: msg.data_type.unwrap_or_else(|| infer_type(&msg.value)),
         }
-        (DataType::Scaled, DataValue::Bool(b)) => {
-            sink.send_measured_scaled(cot, ca, ioa, if *b { 1 } else { 0 }, quality);
-        }
+    }
+}
 
-        // ── DoublePoint (fall back to single-point for now) ───────────────────
-        (DataType::DoublePoint, DataValue::Bool(v)) => {
-            warn!(
-                ioa,
-                ca,
-                "DoublePoint not natively supported via convenience API; sending as SinglePoint"
-            );
-            sink.send_single_point(cot, ca, ioa, *v, quality);
+fn dispatch_single_point<S: DataSink>(sink: &S, context: &DispatchContext, value: &DataValue) {
+    sink.send_single_point(
+        context.cot,
+        context.ca,
+        context.ioa,
+        as_single_point_value(value),
+        context.quality,
+    );
+}
+
+fn dispatch_float_like<S: DataSink>(sink: &S, context: &DispatchContext, value: &DataValue) {
+    sink.send_measured_float(
+        context.cot,
+        context.ca,
+        context.ioa,
+        as_float_value(value),
+        context.quality,
+    );
+}
+
+fn dispatch_scaled<S: DataSink>(sink: &S, context: &DispatchContext, value: &DataValue) {
+    sink.send_measured_scaled(
+        context.cot,
+        context.ca,
+        context.ioa,
+        as_scaled_value(value),
+        context.quality,
+    );
+}
+
+fn dispatch_double_point<S: DataSink>(sink: &S, context: &DispatchContext, value: &DataValue) {
+    warn!(
+        ioa = context.ioa,
+        ca = context.ca,
+        "DoublePoint not natively supported via convenience API; sending as SinglePoint"
+    );
+    dispatch_single_point(sink, context, value);
+}
+
+fn as_single_point_value(value: &DataValue) -> bool {
+    match value {
+        DataValue::Bool(value) => *value,
+        DataValue::Number(value) => *value != 0.0,
+    }
+}
+
+fn as_float_value(value: &DataValue) -> f32 {
+    match value {
+        DataValue::Bool(value) => {
+            if *value {
+                1.0
+            } else {
+                0.0
+            }
         }
-        (DataType::DoublePoint, DataValue::Number(n)) => {
-            warn!(
-                ioa,
-                ca,
-                "DoublePoint not natively supported via convenience API; sending as SinglePoint"
-            );
-            sink.send_single_point(cot, ca, ioa, *n != 0.0, quality);
+        DataValue::Number(value) => *value as f32,
+    }
+}
+
+fn as_scaled_value(value: &DataValue) -> i16 {
+    match value {
+        DataValue::Bool(value) => {
+            if *value {
+                1
+            } else {
+                0
+            }
         }
+        DataValue::Number(value) => value.clamp(i16::MIN as f64, i16::MAX as f64) as i16,
     }
 }
 

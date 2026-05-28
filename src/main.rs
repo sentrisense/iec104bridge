@@ -40,6 +40,7 @@ mod config;
 mod message;
 mod source;
 mod tls;
+mod validation;
 
 #[cfg(test)]
 mod e2e_tests;
@@ -55,12 +56,16 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
-use config::Config;
+use config::{Config, InputTransport};
 use message::Iec104Message;
-use source::{MessageSource, NatsSource};
+use source::{MessageSource, NatsSource, UnixSocketSource};
 use tls::TlsConfig;
 
 // ─── Shared metrics ───────────────────────────────────────────────────────────
+
+type DataStore = Arc<Mutex<HashMap<(u16, u32), Iec104Message>>>;
+type SharedServer = Arc<Mutex<lib60870::Server>>;
+type ServerSlot = Arc<Mutex<Option<SharedServer>>>;
 
 #[derive(Debug, Default)]
 pub struct Metrics {
@@ -70,215 +75,20 @@ pub struct Metrics {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // ── Logging ───────────────────────────────────────────────────────────────
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "iec104bridge=info".into()),
-        )
-        .init();
-
-    // ── Config ────────────────────────────────────────────────────────────────
+    init_logging();
     let config = Config::from_env()?;
+    log_startup(&config);
 
-    info!(
-        source       = "nats",
-        nats_url     = %config.nats_url,
-        stream       = %config.nats_stream,
-        consumer     = %config.nats_consumer,
-        filter       = ?config.nats_subject_filter,
-        iec104_port  = config.iec104_port,
-        iec104_ca    = config.iec104_default_ca,
-        metrics_port = config.metrics_port,
-        tls_enabled  = config.tls_enabled,
-        tls_port     = config.tls_port,
-        "Starting IEC-104 bridge"
-    );
-
-    // ── Prometheus metrics ────────────────────────────────────────────────────
     let metrics: Arc<Metrics> = Arc::new(Metrics::default());
-
-    // ── IEC-104 data cache ────────────────────────────────────────────────────
-    // Stores the most-recent value for each (ca, ioa) pair so that general
-    // interrogation commands can replay current values.
-    let data_store: Arc<Mutex<HashMap<(u16, u32), Iec104Message>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
-    // ── IEC-104 server ────────────────────────────────────────────────────────
-    // When TLS is enabled the lib60870 server binds only on loopback so that
-    // external connections must go through the TLS proxy (port 19998).  In
-    // plaintext mode it binds on the configured address (default 0.0.0.0).
-    let iec104_bind_addr = if config.tls_enabled {
-        info!("TLS mode: binding lib60870 to loopback only (127.0.0.1)");
-        "127.0.0.1".to_string()
-    } else {
-        config.iec104_bind_addr.clone()
-    };
-
-    let mut iec_server = ServerBuilder::new()
-        .local_address(&iec104_bind_addr)
-        .local_port(config.iec104_port)
-        .build()
-        .ok_or_else(|| anyhow::anyhow!("Failed to build IEC-104 server"))?;
-
-    // ── Connection handlers ───────────────────────────────────────────────────
-    iec_server.set_connection_request_handler(|ip| {
-        info!(remote_ip = %ip, "IEC-104 connection request – accepted");
-        true
-    });
-
-    iec_server.set_connection_event_handler(|event| {
-        info!(event = ?event, "IEC-104 connection event");
-    });
-
-    // ── Interrogation handler ─────────────────────────────────────────────────
-    // The handler needs access to the Server instance to enqueue data, but the
-    // Server is not yet wrapped in an Arc when the handler is registered.  We
-    // work around this with an Arc<Mutex<Option<Arc<Mutex<Server>>>>> that is
-    // set to Some(...) immediately after the server is promoted to an Arc.
-    let server_slot: Arc<Mutex<Option<Arc<Mutex<lib60870::Server>>>>> = Arc::new(Mutex::new(None));
-
-    {
-        let slot_clone = Arc::clone(&server_slot);
-        let store_clone = Arc::clone(&data_store);
-        let metrics_clone = Arc::clone(&metrics);
-        let default_ca = config.iec104_default_ca;
-
-        iec_server.set_interrogation_handler(
-            move |conn: &lib60870::MasterConnection, asdu: lib60870::Asdu, qoi: u8| {
-                info!(qoi, "Received station interrogation");
-
-                conn.send_act_con(&asdu, false);
-
-                if let Some(ref srv_arc) = *slot_clone.lock().unwrap() {
-                    let store = store_clone.lock().unwrap();
-                    let server = srv_arc.lock().unwrap();
-
-                    for (_, msg) in store.iter() {
-                        let ca = msg.ca.unwrap_or(default_ca);
-                        if qoi == QOI_STATION {
-                            bridge::dispatch(&bridge::LiveSink(&server), msg, ca);
-                        }
-                        // For group-specific interrogations (qoi 21–36) filter by
-                        // IOA group range here.
-                    }
-                }
-
-                metrics_clone.gi_responses.fetch_add(1, Ordering::Relaxed);
-                conn.send_act_term(&asdu);
-                true
-            },
-        );
-    }
-
-    // Start the server and promote it to a shared Arc.
-    iec_server.start();
-    info!(port = config.iec104_port, "IEC-104 server started");
-
-    let server: Arc<Mutex<lib60870::Server>> = Arc::new(Mutex::new(iec_server));
-    *server_slot.lock().unwrap() = Some(Arc::clone(&server));
-
-    // ── TLS listener (IEC 62351-3) ────────────────────────────────────────────
-    // When TLS is enabled, accept connections on the TLS port (default 19998),
-    // perform the mTLS handshake, then proxy plaintext to lib60870's loopback
-    // socket.  This runs as an independent Tokio task so it does not block the
-    // main message loop.
-    if config.tls_enabled {
-        let tls_cfg = TlsConfig {
-            cert_path: config
-                .tls_cert_path
-                .clone()
-                .expect("validated in Config::from_lookup"),
-            key_path: config
-                .tls_key_path
-                .clone()
-                .expect("validated in Config::from_lookup"),
-            ca_cert_path: config
-                .tls_ca_cert_path
-                .clone()
-                .expect("validated in Config::from_lookup"),
-        };
-
-        let acceptor = tls::build_acceptor(&tls_cfg)
-            .map_err(|e| anyhow::anyhow!("Failed to build TLS acceptor: {e}"))?;
-
-        let tls_bind = format!("{}:{}", config.iec104_bind_addr, config.tls_port);
-        let iec104_local: std::net::SocketAddr =
-            format!("127.0.0.1:{}", config.iec104_port).parse()?;
-
-        let tls_listener = tokio::net::TcpListener::bind(&tls_bind)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to bind TLS listener on {tls_bind}: {e}"))?;
-
-        info!(addr = %tls_bind, "TLS (IEC 62351-3) listener started");
-
-        tokio::spawn(async move {
-            loop {
-                match tls_listener.accept().await {
-                    Ok((tcp, peer)) => {
-                        tls::spawn_tls_proxy(tcp, acceptor.clone(), peer, iec104_local);
-                    }
-                    Err(e) => {
-                        error!(error = %e, "TLS listener: accept error");
-                    }
-                }
-            }
-        });
-    }
-
-    // ── Prometheus metrics HTTP server ────────────────────────────────────────
-    {
-        let metrics_clone = Arc::clone(&metrics);
-        let data_store_clone = Arc::clone(&data_store);
-        let metrics_port = config.metrics_port;
-
-        tokio::spawn(async move {
-            let addr = format!("0.0.0.0:{metrics_port}");
-            let listener = match TcpListener::bind(&addr).await {
-                Ok(l) => {
-                    info!(port = metrics_port, "Metrics endpoint listening");
-                    l
-                }
-                Err(e) => {
-                    error!(error = %e, "Failed to bind metrics port");
-                    return;
-                }
-            };
-            loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
-                    continue;
-                };
-                let metrics_ref = Arc::clone(&metrics_clone);
-                let data_store_ref = Arc::clone(&data_store_clone);
-                tokio::spawn(async move {
-                    let cache_size = data_store_ref.lock().unwrap().len() as u64;
-                    let msgs_dispatched = metrics_ref.messages_dispatched.load(Ordering::Relaxed);
-                    let gi_responses = metrics_ref.gi_responses.load(Ordering::Relaxed);
-
-                    let body = format!(
-                        "# HELP iec104bridge_cache_size Number of data points currently cached\n\
-                         # TYPE iec104bridge_cache_size gauge\n\
-                         iec104bridge_cache_size {cache_size}\n\
-                         # HELP iec104bridge_messages_dispatched_total Total IEC-104 messages dispatched\n\
-                         # TYPE iec104bridge_messages_dispatched_total counter\n\
-                         iec104bridge_messages_dispatched_total {msgs_dispatched}\n\
-                         # HELP iec104bridge_gi_responses_total Total General Interrogation responses\n\
-                         # TYPE iec104bridge_gi_responses_total counter\n\
-                         iec104bridge_gi_responses_total {gi_responses}\n"
-                    );
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                });
-            }
-        });
-    }
-
-    // ── Message source ────────────────────────────────────────────────────────
-    let source: Box<dyn MessageSource> = Box::new(NatsSource::from_config(&config).await?);
+    let data_store: DataStore = Arc::new(Mutex::new(HashMap::new()));
+    let server = build_iec_server(&config, Arc::clone(&data_store), Arc::clone(&metrics))?;
+    spawn_tls_listener_if_enabled(&config).await?;
+    spawn_metrics_http_server(
+        config.metrics_port,
+        Arc::clone(&metrics),
+        Arc::clone(&data_store),
+    );
+    let source = build_message_source(&config).await?;
 
     run_message_loop(
         source,
@@ -291,6 +101,244 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Bridge stopped");
     Ok(())
+}
+
+fn init_logging() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "iec104bridge=info".into()),
+        )
+        .init();
+}
+
+fn log_startup(config: &Config) {
+    match config.input_transport {
+        InputTransport::Nats => info!(
+            source = config.input_transport.as_str(),
+            nats_url = %config.nats_url,
+            stream = %config.nats_stream,
+            consumer = %config.nats_consumer,
+            filter = ?config.nats_subject_filter,
+            iec104_port = config.iec104_port,
+            iec104_ca = config.iec104_default_ca,
+            metrics_port = config.metrics_port,
+            tls_enabled = config.tls_enabled,
+            tls_port = config.tls_port,
+            "Starting IEC-104 bridge"
+        ),
+        InputTransport::UnixSocket => info!(
+            source = config.input_transport.as_str(),
+            unix_socket_path = %config.unix_socket_path,
+            unix_socket_allowed_uid = ?config.unix_socket_allowed_uid,
+            unix_socket_allowed_gid = ?config.unix_socket_allowed_gid,
+            unix_socket_max_bytes = config.unix_socket_max_line_bytes,
+            iec104_port = config.iec104_port,
+            iec104_ca = config.iec104_default_ca,
+            metrics_port = config.metrics_port,
+            tls_enabled = config.tls_enabled,
+            tls_port = config.tls_port,
+            "Starting IEC-104 bridge"
+        ),
+    }
+}
+
+fn build_iec_server(
+    config: &Config,
+    data_store: DataStore,
+    metrics: Arc<Metrics>,
+) -> anyhow::Result<SharedServer> {
+    let mut iec_server = ServerBuilder::new()
+        .local_address(&effective_iec104_bind_addr(config))
+        .local_port(config.iec104_port)
+        .build()
+        .ok_or_else(|| anyhow::anyhow!("Failed to build IEC-104 server"))?;
+
+    install_connection_handlers(&mut iec_server);
+
+    let server_slot: ServerSlot = Arc::new(Mutex::new(None));
+    install_interrogation_handler(
+        &mut iec_server,
+        Arc::clone(&server_slot),
+        data_store,
+        metrics,
+        config.iec104_default_ca,
+    );
+
+    iec_server.start();
+    info!(port = config.iec104_port, "IEC-104 server started");
+
+    let server = Arc::new(Mutex::new(iec_server));
+    *server_slot.lock().unwrap() = Some(Arc::clone(&server));
+    Ok(server)
+}
+
+fn effective_iec104_bind_addr(config: &Config) -> String {
+    if config.tls_enabled {
+        info!("TLS mode: binding lib60870 to loopback only (127.0.0.1)");
+        "127.0.0.1".to_string()
+    } else {
+        config.iec104_bind_addr.clone()
+    }
+}
+
+fn install_connection_handlers(iec_server: &mut lib60870::Server) {
+    iec_server.set_connection_request_handler(|ip| {
+        info!(remote_ip = %ip, "IEC-104 connection request – accepted");
+        true
+    });
+
+    iec_server.set_connection_event_handler(|event| {
+        info!(event = ?event, "IEC-104 connection event");
+    });
+}
+
+fn install_interrogation_handler(
+    iec_server: &mut lib60870::Server,
+    server_slot: ServerSlot,
+    data_store: DataStore,
+    metrics: Arc<Metrics>,
+    default_ca: u16,
+) {
+    iec_server.set_interrogation_handler(
+        move |conn: &lib60870::MasterConnection, asdu: lib60870::Asdu, qoi: u8| {
+            info!(qoi, "Received station interrogation");
+            conn.send_act_con(&asdu, false);
+
+            if qoi == QOI_STATION {
+                replay_cached_values(&server_slot, &data_store, default_ca);
+            }
+
+            metrics.gi_responses.fetch_add(1, Ordering::Relaxed);
+            conn.send_act_term(&asdu);
+            true
+        },
+    );
+}
+
+fn replay_cached_values(server_slot: &ServerSlot, data_store: &DataStore, default_ca: u16) {
+    if let Some(server) = server_slot.lock().unwrap().as_ref().cloned() {
+        let store = data_store.lock().unwrap();
+        let server = server.lock().unwrap();
+
+        for msg in store.values() {
+            let ca = msg.ca.unwrap_or(default_ca);
+            bridge::dispatch(&bridge::LiveSink(&server), msg, ca);
+        }
+    }
+}
+
+async fn spawn_tls_listener_if_enabled(config: &Config) -> anyhow::Result<()> {
+    if !config.tls_enabled {
+        return Ok(());
+    }
+
+    let tls_cfg = TlsConfig {
+        cert_path: config
+            .tls_cert_path
+            .clone()
+            .expect("validated in Config::from_lookup"),
+        key_path: config
+            .tls_key_path
+            .clone()
+            .expect("validated in Config::from_lookup"),
+        ca_cert_path: config
+            .tls_ca_cert_path
+            .clone()
+            .expect("validated in Config::from_lookup"),
+    };
+
+    let acceptor = tls::build_acceptor(&tls_cfg)
+        .map_err(|e| anyhow::anyhow!("Failed to build TLS acceptor: {e}"))?;
+    let tls_bind = format!("{}:{}", config.iec104_bind_addr, config.tls_port);
+    let iec104_local: std::net::SocketAddr = format!("127.0.0.1:{}", config.iec104_port).parse()?;
+    let tls_listener = tokio::net::TcpListener::bind(&tls_bind)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to bind TLS listener on {tls_bind}: {e}"))?;
+
+    info!(addr = %tls_bind, "TLS (IEC 62351-3) listener started");
+
+    tokio::spawn(async move {
+        loop {
+            match tls_listener.accept().await {
+                Ok((tcp, peer)) => {
+                    tls::spawn_tls_proxy(tcp, acceptor.clone(), peer, iec104_local);
+                }
+                Err(e) => error!(error = %e, "TLS listener: accept error"),
+            }
+        }
+    });
+
+    Ok(())
+}
+
+fn spawn_metrics_http_server(metrics_port: u16, metrics: Arc<Metrics>, data_store: DataStore) {
+    let metrics_clone = Arc::clone(&metrics);
+    let data_store_clone = Arc::clone(&data_store);
+
+    tokio::spawn(async move {
+        let listener = match bind_metrics_listener(metrics_port).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                error!(error = %e, "Failed to bind metrics port");
+                return;
+            }
+        };
+
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+
+            let metrics_ref = Arc::clone(&metrics_clone);
+            let data_store_ref = Arc::clone(&data_store_clone);
+            tokio::spawn(async move {
+                serve_metrics_connection(stream, metrics_ref, data_store_ref).await;
+            });
+        }
+    });
+}
+
+async fn bind_metrics_listener(metrics_port: u16) -> anyhow::Result<TcpListener> {
+    let addr = format!("0.0.0.0:{metrics_port}");
+    let listener = TcpListener::bind(&addr).await?;
+    info!(port = metrics_port, "Metrics endpoint listening");
+    Ok(listener)
+}
+
+async fn serve_metrics_connection(
+    mut stream: tokio::net::TcpStream,
+    metrics: Arc<Metrics>,
+    data_store: DataStore,
+) {
+    let cache_size = data_store.lock().unwrap().len() as u64;
+    let msgs_dispatched = metrics.messages_dispatched.load(Ordering::Relaxed);
+    let gi_responses = metrics.gi_responses.load(Ordering::Relaxed);
+
+    let body = format!(
+        "# HELP iec104bridge_cache_size Number of data points currently cached\n\
+         # TYPE iec104bridge_cache_size gauge\n\
+         iec104bridge_cache_size {cache_size}\n\
+         # HELP iec104bridge_messages_dispatched_total Total IEC-104 messages dispatched\n\
+         # TYPE iec104bridge_messages_dispatched_total counter\n\
+         iec104bridge_messages_dispatched_total {msgs_dispatched}\n\
+         # HELP iec104bridge_gi_responses_total Total General Interrogation responses\n\
+         # TYPE iec104bridge_gi_responses_total counter\n\
+         iec104bridge_gi_responses_total {gi_responses}\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+}
+
+async fn build_message_source(config: &Config) -> anyhow::Result<Box<dyn MessageSource>> {
+    match config.input_transport {
+        InputTransport::Nats => Ok(Box::new(NatsSource::from_config(config).await?)),
+        InputTransport::UnixSocket => Ok(Box::new(UnixSocketSource::from_config(config).await?)),
+    }
 }
 
 /// Drive the bridge's message loop until the stream ends or Ctrl-C is received.
@@ -352,7 +400,7 @@ pub async fn run_message_loop(
                         // broker to redeliver; a crash after is acceptable because
                         // the data has already been handed to the IEC-104 stack.
                         if let Err(e) = incoming.ack().await {
-                            error!(error = %e, "Failed to ack NATS message after dispatch");
+                            error!(error = %e, "Failed to acknowledge message after dispatch");
                         }
 
                         metrics.messages_dispatched.fetch_add(1, Ordering::Relaxed);

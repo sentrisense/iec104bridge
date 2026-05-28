@@ -14,6 +14,8 @@ futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+libc = "0.2"
+tokio-stream = "0.1"
 
 # IEC 62351-3 / mTLS support
 rustls          = { version = "0.23", default-features = false, features = ["std", "tls12"] }

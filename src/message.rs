@@ -91,6 +91,7 @@ pub enum DataType {
 
 /// Quality flags supported in JSON messages.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[repr(u8)]
 #[serde(rename_all = "snake_case")]
 pub enum QualityField {
     #[default]
@@ -110,6 +111,7 @@ pub enum QualityField {
 
 /// Cause of Transmission variants that can appear in JSON messages.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[repr(u8)]
 #[serde(rename_all = "snake_case")]
 pub enum CotField {
     #[default]
