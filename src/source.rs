@@ -874,6 +874,7 @@ mod tests {
             ca: None,
             quality: QualityField::Good,
             cot: CotField::Spontaneous,
+            timestamp: None,
         }
     }
 

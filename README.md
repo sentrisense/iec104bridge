@@ -189,6 +189,7 @@ corresponding ASDU to all connected clients.
 | `ca` | integer | `IEC104_CA` env var | **Common Address** — identifies the outstation.  Matches the CA the client filters on.  Range: 1 – 65 534. |
 | `quality` | string | `"good"` | **Quality Descriptor** flags to attach to the measurement.  See Quality values below. |
 | `cot` | string | `"spontaneous"` | **Cause of Transmission** — why this value is being sent.  Most upstream systems set `"spontaneous"` for live updates or `"periodic"` for timed scans. |
+| `timestamp` | RFC3339 UTC string | omitted | **Source timestamp** for the value. When present the bridge emits the CP56Time2a-tagged IEC-104 variant for the selected point type and preserves the timestamp for GI replay. |
 
 ### `"type"` values
 
@@ -199,9 +200,13 @@ above):
 | `"type"` | IEC-104 type | Wire encoding |
 |---|---|---|
 | `"single_point"` | M_SP_NA_1 (1) | boolean ON/OFF |
+| `"single_point"` + `timestamp` | M_SP_TB_1 (30) | boolean ON/OFF + CP56Time2a |
 | `"float"` | M_ME_NC_1 (13) | 32-bit IEEE 754 float |
+| `"float"` + `timestamp` | M_ME_TF_1 (36) | 32-bit IEEE 754 float + CP56Time2a |
 | `"scaled"` | M_ME_NB_1 (11) | signed 16-bit integer, clamped |
+| `"scaled"` + `timestamp` | M_ME_TE_1 (35) | signed 16-bit integer + CP56Time2a |
 | `"normalized"` | M_ME_NA_1 (9) | 16-bit normalized (sent as float) |
+| `"normalized"` + `timestamp` | M_ME_TD_1 (34) | normalized float + CP56Time2a |
 | `"double_point"` | *(fallback)* | sent as single point |
 
 When `"type"` is omitted the type is **inferred from the JSON value**:
@@ -394,6 +399,7 @@ python examples/unix_socket_sender.py /run/iec104bridge/input.sock
 
 - One JSON object per line.
 - The payload schema is the same `Iec104Message` schema used by NATS mode.
+- `timestamp` is optional; when present it must be RFC3339 and is preserved in the bridge cache for GI replay.
 - The bridge replies with one line per request:
   - `ok`
   - `error parse`

@@ -31,10 +31,12 @@
 //!   "type":    "float",
 //!   "ca":      1,
 //!   "quality": "good",
-//!   "cot":     "spontaneous"
+//!   "cot":     "spontaneous",
+//!   "timestamp": "2026-05-29T12:34:56.789Z"
 //! }
 //! ```
 
+mod asdu;
 mod bridge;
 mod config;
 mod message;
