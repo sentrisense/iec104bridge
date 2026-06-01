@@ -726,17 +726,7 @@ fn socket_parent(path: &Path) -> anyhow::Result<&Path> {
 }
 
 fn ensure_socket_parent_dir(parent: &Path) -> anyhow::Result<bool> {
-    let created_parent_dir = if parent.exists() {
-        false
-    } else {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to create Unix socket directory '{}': {e}",
-                parent.display()
-            )
-        })?;
-        true
-    };
+    let created_parent_dir = create_directory_if_missing(parent)?;
 
     let metadata = std::fs::symlink_metadata(parent).map_err(|e| {
         anyhow::anyhow!(
@@ -752,6 +742,34 @@ fn ensure_socket_parent_dir(parent: &Path) -> anyhow::Result<bool> {
     }
 
     Ok(created_parent_dir)
+}
+
+fn create_directory_if_missing(path: &Path) -> anyhow::Result<bool> {
+    match std::fs::create_dir(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unix socket path '{}' must have a parent directory",
+                    path.display()
+                )
+            })?;
+            create_directory_if_missing(parent)?;
+            match std::fs::create_dir(path) {
+                Ok(()) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                Err(e) => Err(anyhow::anyhow!(
+                    "Failed to create Unix socket directory '{}': {e}",
+                    path.display()
+                )),
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(anyhow::anyhow!(
+            "Failed to create Unix socket directory '{}': {e}",
+            path.display()
+        )),
+    }
 }
 
 fn remove_existing_socket_path(path: &Path) -> anyhow::Result<()> {

@@ -117,7 +117,9 @@ impl DataSink for LiveSink<'_> {
             server_ptr: Some(self.0.as_ptr()),
             ..message
         };
-        let _ = asdu::enqueue_timed_asdu(message);
+        if !asdu::enqueue_timed_asdu(message) {
+            warn!("Failed to enqueue timed IEC-104 ASDU");
+        }
     }
 }
 

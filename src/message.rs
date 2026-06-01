@@ -57,7 +57,7 @@ pub struct Iec104Message {
     #[serde(default)]
     pub cot: CotField,
 
-    /// Source timestamp for this value in RFC3339 UTC form.
+    /// Source timestamp for this value in RFC3339 format with timezone/offset.
     ///
     /// When present the bridge emits a CP56Time2a-tagged IEC-104 information
     /// object and preserves the timestamp in its point cache for GI replay.
