@@ -275,12 +275,12 @@ impl UnixSocketSource {
         max_line_bytes: usize,
     ) -> anyhow::Result<Self> {
         let path = PathBuf::from(socket_path);
-        prepare_socket_path(&path)?;
+        let created_parent_dir = prepare_socket_path(&path)?;
 
         let listener = UnixListener::bind(&path)
             .map_err(|e| anyhow::anyhow!("Failed to bind Unix socket '{}': {e}", path.display()))?;
 
-        set_socket_permissions(&path)?;
+        set_socket_permissions(&path, created_parent_dir)?;
 
         info!(path = %path.display(), "Unix socket input listener started");
 
@@ -708,12 +708,12 @@ fn message_with_ack(
     })
 }
 
-fn prepare_socket_path(path: &Path) -> anyhow::Result<()> {
+fn prepare_socket_path(path: &Path) -> anyhow::Result<bool> {
     let parent = socket_parent(path)?;
-    ensure_socket_parent_dir(parent)?;
+    let created_parent_dir = ensure_socket_parent_dir(parent)?;
     remove_existing_socket_path(path)?;
 
-    Ok(())
+    Ok(created_parent_dir)
 }
 
 fn socket_parent(path: &Path) -> anyhow::Result<&Path> {
@@ -725,13 +725,8 @@ fn socket_parent(path: &Path) -> anyhow::Result<&Path> {
     })
 }
 
-fn ensure_socket_parent_dir(parent: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(parent).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to create Unix socket directory '{}': {e}",
-            parent.display()
-        )
-    })?;
+fn ensure_socket_parent_dir(parent: &Path) -> anyhow::Result<bool> {
+    let created_parent_dir = create_directory_if_missing(parent)?;
 
     let metadata = std::fs::symlink_metadata(parent).map_err(|e| {
         anyhow::anyhow!(
@@ -746,7 +741,35 @@ fn ensure_socket_parent_dir(parent: &Path) -> anyhow::Result<()> {
         );
     }
 
-    Ok(())
+    Ok(created_parent_dir)
+}
+
+fn create_directory_if_missing(path: &Path) -> anyhow::Result<bool> {
+    match std::fs::create_dir(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unix socket path '{}' must have a parent directory",
+                    path.display()
+                )
+            })?;
+            create_directory_if_missing(parent)?;
+            match std::fs::create_dir(path) {
+                Ok(()) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                Err(e) => Err(anyhow::anyhow!(
+                    "Failed to create Unix socket directory '{}': {e}",
+                    path.display()
+                )),
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(anyhow::anyhow!(
+            "Failed to create Unix socket directory '{}': {e}",
+            path.display()
+        )),
+    }
 }
 
 fn remove_existing_socket_path(path: &Path) -> anyhow::Result<()> {
@@ -784,16 +807,18 @@ fn remove_existing_socket_entry(path: &Path, existing: std::fs::Metadata) -> any
     )
 }
 
-fn set_socket_permissions(path: &Path) -> anyhow::Result<()> {
+fn set_socket_permissions(path: &Path, created_parent_dir: bool) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
         let parent = path.parent().expect("validated parent exists");
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o750)).map_err(|e| {
-            anyhow::anyhow!("Failed to set permissions on '{}': {e}", parent.display())
-        })?;
+        if created_parent_dir {
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o750)).map_err(|e| {
+                anyhow::anyhow!("Failed to set permissions on '{}': {e}", parent.display())
+            })?;
+        }
         fs::set_permissions(path, fs::Permissions::from_mode(0o660)).map_err(|e| {
             anyhow::anyhow!("Failed to set permissions on '{}': {e}", path.display())
         })?;
@@ -857,13 +882,17 @@ impl MessageSource for IterSource {
 
 #[cfg(test)]
 mod tests {
+    use lib60870::types::{CauseOfTransmission, TypeId};
     use std::time::Duration;
 
     use futures::StreamExt as _;
     use tempfile::tempdir;
+    use time::OffsetDateTime;
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
     use super::*;
+    use crate::bridge::dispatch;
+    use crate::bridge::test_support::{CapturingSink, SentCall};
     use crate::message::{CotField, DataType, DataValue, QualityField};
 
     fn make_msg(ioa: u32, value: f64) -> Iec104Message {
@@ -874,7 +903,15 @@ mod tests {
             ca: None,
             quality: QualityField::Good,
             cot: CotField::Spontaneous,
+            timestamp: None,
         }
+    }
+
+    fn timestamp_ms(timestamp: &str) -> u64 {
+        OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
+            .unwrap()
+            .unix_timestamp_nanos() as u64
+            / 1_000_000
     }
 
     #[tokio::test]
@@ -939,6 +976,64 @@ mod tests {
         let mut response = String::new();
         reader.read_line(&mut response).await.unwrap();
         assert_eq!(response, "ok\n");
+    }
+
+    #[tokio::test]
+    async fn unix_socket_source_timestamped_message_dispatches_as_timed_iec_output() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("input.sock");
+        let source = UnixSocketSource::with_peer_cred_lookup(
+            &socket_path,
+            None,
+            None,
+            1024,
+            Arc::new(|_| {
+                Ok(PeerCred {
+                    uid: 1000,
+                    gid: 1000,
+                    pid: 1234,
+                })
+            }),
+        )
+        .await
+        .unwrap();
+
+        let mut messages = Box::new(source).into_messages();
+        let client = UnixStream::connect(&socket_path).await.unwrap();
+        let (read_half, mut write_half) = client.into_split();
+        let mut reader = BufReader::new(read_half);
+        let timestamp = "2026-06-01T12:34:56.789Z";
+
+        write_half
+            .write_all(
+                format!(
+                    "{{\"ioa\":1001,\"value\":132.4,\"type\":\"float\",\"timestamp\":\"{timestamp}\"}}\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let incoming = messages.next().await.unwrap().unwrap();
+        let sink = CapturingSink::default();
+        dispatch(&sink, &incoming.message, 1);
+        incoming.ack().await.unwrap();
+
+        let mut response = String::new();
+        reader.read_line(&mut response).await.unwrap();
+
+        assert_eq!(response, "ok\n");
+        assert!(matches!(
+            &sink.calls.into_inner()[0],
+            SentCall::Timed {
+                ioa: 1001,
+                ca: 1,
+                cot: CauseOfTransmission::Spontaneous,
+                data_type: TypeId::MeasuredFloatTime,
+                timestamp_ms: actual_timestamp_ms,
+                ..
+            } if *actual_timestamp_ms == timestamp_ms(timestamp)
+        ));
     }
 
     #[tokio::test]
@@ -1013,7 +1108,19 @@ mod tests {
         let socket_path = dir.path().join("input.sock");
         std::fs::write(&socket_path, b"stale").unwrap();
 
-        prepare_socket_path(&socket_path).unwrap();
+        let created_parent_dir = prepare_socket_path(&socket_path).unwrap();
         assert!(!socket_path.exists());
+        assert!(!created_parent_dir);
+    }
+
+    #[test]
+    fn ensure_socket_parent_dir_reports_when_it_creates_directory() {
+        let dir = tempdir().unwrap();
+        let socket_parent = dir.path().join("new-socket-dir");
+
+        let created_parent_dir = ensure_socket_parent_dir(&socket_parent).unwrap();
+
+        assert!(created_parent_dir);
+        assert!(socket_parent.is_dir());
     }
 }

@@ -8,8 +8,19 @@ use crate::message::{DataType, DataValue, Iec104Message};
 pub fn validate_message(msg: &Iec104Message) -> anyhow::Result<()> {
     validate_ioa(msg.ioa)?;
     validate_ca(msg.ca)?;
+    validate_timestamp(msg.timestamp)?;
     validate_normalized_value(msg.data_type, &msg.value)?;
     validate_boolean_point_value(msg.data_type, &msg.value)?;
+
+    Ok(())
+}
+
+fn validate_timestamp(timestamp: Option<time::OffsetDateTime>) -> anyhow::Result<()> {
+    if let Some(timestamp) = timestamp
+        && timestamp.unix_timestamp_nanos() < 0
+    {
+        anyhow::bail!("timestamp must be on or after 1970-01-01T00:00:00Z");
+    }
 
     Ok(())
 }
@@ -75,6 +86,7 @@ mod tests {
             ca: Some(1),
             quality: QualityField::Good,
             cot: CotField::Spontaneous,
+            timestamp: None,
         }
     }
 
@@ -109,6 +121,13 @@ mod tests {
     fn rejects_numeric_single_point() {
         let mut msg = base_message();
         msg.data_type = Some(DataType::SinglePoint);
+        assert!(validate_message(&msg).is_err());
+    }
+
+    #[test]
+    fn rejects_timestamp_before_unix_epoch() {
+        let mut msg = base_message();
+        msg.timestamp = Some(time::OffsetDateTime::UNIX_EPOCH - time::Duration::SECOND);
         assert!(validate_message(&msg).is_err());
     }
 }

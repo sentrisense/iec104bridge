@@ -31,10 +31,12 @@
 //!   "type":    "float",
 //!   "ca":      1,
 //!   "quality": "good",
-//!   "cot":     "spontaneous"
+//!   "cot":     "spontaneous",
+//!   "timestamp": "2026-05-29T12:34:56.789Z"
 //! }
 //! ```
 
+mod asdu;
 mod bridge;
 mod config;
 mod message;
@@ -96,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
         data_store,
         Arc::clone(&metrics),
         config.iec104_default_ca,
+        config.iec104_gi_only,
     )
     .await;
 
@@ -113,6 +116,12 @@ fn init_logging() {
 }
 
 fn log_startup(config: &Config) {
+    if config.iec104_gi_only {
+        warn!(
+            "IEC104_GI_ONLY enabled: caching updates and serving points only via General Interrogation"
+        );
+    }
+
     match config.input_transport {
         InputTransport::Nats => info!(
             source = config.input_transport.as_str(),
@@ -122,6 +131,7 @@ fn log_startup(config: &Config) {
             filter = ?config.nats_subject_filter,
             iec104_port = config.iec104_port,
             iec104_ca = config.iec104_default_ca,
+            iec104_gi_only = config.iec104_gi_only,
             metrics_port = config.metrics_port,
             tls_enabled = config.tls_enabled,
             tls_port = config.tls_port,
@@ -135,6 +145,7 @@ fn log_startup(config: &Config) {
             unix_socket_max_bytes = config.unix_socket_max_line_bytes,
             iec104_port = config.iec104_port,
             iec104_ca = config.iec104_default_ca,
+            iec104_gi_only = config.iec104_gi_only,
             metrics_port = config.metrics_port,
             tls_enabled = config.tls_enabled,
             tls_port = config.tls_port,
@@ -351,6 +362,7 @@ pub async fn run_message_loop(
     data_store: Arc<Mutex<HashMap<(u16, u32), Iec104Message>>>,
     metrics: Arc<Metrics>,
     default_ca: u16,
+    gi_only: bool,
 ) {
     let mut messages = source.into_messages();
 
@@ -381,32 +393,164 @@ pub async fn run_message_loop(
                         error!(error = %e, "Error receiving message");
                     }
                     Some(Ok(incoming)) => {
-                        let ca = incoming.message.ca.unwrap_or(default_ca);
-
-                        // Update the data cache (lock released before any await).
-                        {
-                            let mut store = data_store.lock().unwrap();
-                            store.insert((ca, incoming.message.ioa), incoming.message.clone());
+                        if let Err(e) = handle_incoming_message(
+                            incoming,
+                            &server,
+                            &data_store,
+                            &metrics,
+                            default_ca,
+                            gi_only,
+                        ).await {
+                            error!(error = %e, "Error processing message");
                         }
-
-                        // Forward to the IEC-104 server.
-                        {
-                            let srv = server.lock().unwrap();
-                            bridge::dispatch(&bridge::LiveSink(&srv), &incoming.message, ca);
-                        }
-
-                        // Ack only after the message has been enqueued in lib60870's
-                        // outbound buffer. A crash before this point will cause the
-                        // broker to redeliver; a crash after is acceptable because
-                        // the data has already been handed to the IEC-104 stack.
-                        if let Err(e) = incoming.ack().await {
-                            error!(error = %e, "Failed to acknowledge message after dispatch");
-                        }
-
-                        metrics.messages_dispatched.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
         }
+    }
+}
+
+async fn handle_incoming_message(
+    incoming: source::IncomingMessage,
+    server: &SharedServer,
+    data_store: &DataStore,
+    metrics: &Arc<Metrics>,
+    default_ca: u16,
+    gi_only: bool,
+) -> anyhow::Result<()> {
+    let ca = incoming.message.ca.unwrap_or(default_ca);
+
+    {
+        let mut store = data_store.lock().unwrap();
+        store.insert((ca, incoming.message.ioa), incoming.message.clone());
+    }
+
+    let dispatched = if gi_only {
+        false
+    } else {
+        let srv = server.lock().unwrap();
+        dispatch_message_if_enabled(&bridge::LiveSink(&srv), &incoming.message, ca, gi_only)
+    };
+
+    incoming.ack().await.map_err(|e| {
+        anyhow::anyhow!("Failed to acknowledge message after dispatch/cache update: {e}")
+    })?;
+
+    if dispatched {
+        metrics.messages_dispatched.fetch_add(1, Ordering::Relaxed);
+    }
+
+    Ok(())
+}
+
+fn dispatch_message_if_enabled<S: bridge::DataSink>(
+    sink: &S,
+    message: &Iec104Message,
+    ca: u16,
+    gi_only: bool,
+) -> bool {
+    if gi_only {
+        return false;
+    }
+
+    bridge::dispatch(sink, message, ca);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use lib60870::server::ServerBuilder;
+
+    use super::{
+        DataStore, Metrics, SharedServer, dispatch_message_if_enabled, handle_incoming_message,
+    };
+    use crate::bridge::test_support::{CapturingSink, SentCall};
+    use crate::message::{CotField, DataType, DataValue, Iec104Message, QualityField};
+    use crate::source::IncomingMessage;
+
+    fn sample_message() -> Iec104Message {
+        Iec104Message {
+            ioa: 100,
+            value: DataValue::Number(42.5),
+            data_type: Some(DataType::Float),
+            ca: None,
+            quality: QualityField::Good,
+            cot: CotField::Spontaneous,
+            timestamp: None,
+        }
+    }
+
+    fn test_server() -> SharedServer {
+        Arc::new(std::sync::Mutex::new(
+            ServerBuilder::new()
+                .local_address("127.0.0.1")
+                .local_port(0)
+                .build()
+                .expect("server should build"),
+        ))
+    }
+
+    #[test]
+    fn dispatch_message_if_enabled_skips_when_gi_only() {
+        let sink = CapturingSink::default();
+        let dispatched = dispatch_message_if_enabled(&sink, &sample_message(), 7, true);
+
+        assert!(!dispatched);
+        assert!(sink.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn dispatch_message_if_enabled_dispatches_when_spontaneous_enabled() {
+        let sink = CapturingSink::default();
+        let dispatched = dispatch_message_if_enabled(&sink, &sample_message(), 7, false);
+
+        assert!(dispatched);
+        assert!(matches!(
+            sink.calls.borrow()[0],
+            SentCall::MeasuredFloat {
+                ca: 7,
+                ioa: 100,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_incoming_message_gi_only_caches_and_acks_without_dispatching() {
+        let server = test_server();
+        let data_store: DataStore = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let metrics = Arc::new(Metrics::default());
+        let acked = Arc::new(tokio::sync::Mutex::new(false));
+        let acked_flag = Arc::clone(&acked);
+        let message = sample_message();
+
+        handle_incoming_message(
+            IncomingMessage::with_ack(message.clone(), move || {
+                let acked_flag = Arc::clone(&acked_flag);
+                async move {
+                    *acked_flag.lock().await = true;
+                    Ok(())
+                }
+            }),
+            &server,
+            &data_store,
+            &metrics,
+            7,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let store = data_store.lock().unwrap();
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get(&(7, 100)), Some(&message));
+        drop(store);
+
+        assert!(*acked.lock().await);
+        assert_eq!(metrics.messages_dispatched.load(Ordering::Relaxed), 0);
     }
 }

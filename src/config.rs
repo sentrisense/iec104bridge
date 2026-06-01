@@ -76,6 +76,10 @@ pub struct Config {
     /// Default Common Address (ASDU address) when not supplied in the JSON
     /// message (default: `1`)
     pub iec104_default_ca: u16,
+    /// Disable immediate outbound updates and serve cached values only on GI.
+    ///
+    /// Set via `IEC104_GI_ONLY=true` (default: `false`).
+    pub iec104_gi_only: bool,
 
     // ── Observability ─────────────────────────────────────────────────────────
     /// TCP port for the Prometheus metrics HTTP endpoint (default: `9091`).
@@ -115,7 +119,7 @@ pub struct Config {
 
 type NatsConfigParts = (String, String, String, Option<String>, Option<String>);
 type UnixSocketConfigParts = (String, Option<u32>, Option<u32>, usize);
-type ServerConfigParts = (String, u16, u16, u16);
+type ServerConfigParts = (String, u16, u16, bool, u16);
 type TlsConfigParts = (bool, Option<String>, Option<String>, Option<String>, u16);
 
 struct ConfigParts {
@@ -159,7 +163,8 @@ impl Config {
             unix_socket_allowed_gid,
             unix_socket_max_line_bytes,
         ) = parts.unix_socket;
-        let (iec104_bind_addr, iec104_port, iec104_default_ca, metrics_port) = parts.server;
+        let (iec104_bind_addr, iec104_port, iec104_default_ca, iec104_gi_only, metrics_port) =
+            parts.server;
         let (tls_enabled, tls_cert_path, tls_key_path, tls_ca_cert_path, tls_port) = parts.tls;
 
         Ok(Self {
@@ -176,6 +181,7 @@ impl Config {
             iec104_bind_addr,
             iec104_port,
             iec104_default_ca,
+            iec104_gi_only,
             metrics_port,
             tls_enabled,
             tls_cert_path,
@@ -276,6 +282,7 @@ impl Config {
             get("IEC104_BIND_ADDR").unwrap_or_else(|| "0.0.0.0".into()),
             Self::parse_with_default(get, "IEC104_PORT", "2404")?,
             Self::parse_with_default(get, "IEC104_CA", "1")?,
+            Self::is_truthy(get("IEC104_GI_ONLY")),
             Self::parse_with_default(get, "METRICS_PORT", "9091")?,
         ))
     }
@@ -435,6 +442,12 @@ mod tests {
     }
 
     #[test]
+    fn default_iec104_gi_only_is_false() {
+        let cfg = from_map(&required()).unwrap();
+        assert!(!cfg.iec104_gi_only);
+    }
+
+    #[test]
     fn default_bind_addr() {
         let cfg = from_map(&required()).unwrap();
         assert_eq!(cfg.iec104_bind_addr, "0.0.0.0");
@@ -479,6 +492,14 @@ mod tests {
         map.insert("IEC104_CA", "42");
         let cfg = from_map(&map).unwrap();
         assert_eq!(cfg.iec104_default_ca, 42);
+    }
+
+    #[test]
+    fn custom_iec104_gi_only() {
+        let mut map = required();
+        map.insert("IEC104_GI_ONLY", "yes");
+        let cfg = from_map(&map).unwrap();
+        assert!(cfg.iec104_gi_only);
     }
 
     #[test]

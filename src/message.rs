@@ -20,11 +20,14 @@
 //!   "type":    "float",
 //!   "ca":      1,
 //!   "quality": "good",
-//!   "cot":     "spontaneous"
+//!   "cot":     "spontaneous",
+//!   "timestamp": "2026-05-29T12:34:56.789Z"
 //! }
 //! ```
 
 use serde::Deserialize;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 /// Root message structure.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -53,6 +56,24 @@ pub struct Iec104Message {
     /// Cause of Transmission (default: `spontaneous`).
     #[serde(default)]
     pub cot: CotField,
+
+    /// Source timestamp for this value in RFC3339 format with timezone/offset.
+    ///
+    /// When present the bridge emits a CP56Time2a-tagged IEC-104 information
+    /// object and preserves the timestamp in its point cache for GI replay.
+    #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
+    pub timestamp: Option<OffsetDateTime>,
+}
+
+fn deserialize_optional_timestamp<'de, D>(
+    deserializer: D,
+) -> Result<Option<OffsetDateTime>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    raw.map(|value| OffsetDateTime::parse(&value, &Rfc3339).map_err(serde::de::Error::custom))
+        .transpose()
 }
 
 // ─── value ────────────────────────────────────────────────────────────────────
@@ -145,6 +166,7 @@ mod tests {
         assert_eq!(msg.ca, None);
         assert_eq!(msg.quality, QualityField::Good);
         assert_eq!(msg.cot, CotField::Spontaneous);
+        assert_eq!(msg.timestamp, None);
     }
 
     #[test]
@@ -276,6 +298,28 @@ mod tests {
         assert_eq!(msg.cot, CotField::ReturnInfoLocal);
     }
 
+    #[test]
+    fn timestamp_field_present() {
+        let msg = parse(r#"{"ioa": 1, "value": 0, "timestamp": "2026-05-29T12:34:56.789Z"}"#);
+        let timestamp = msg.timestamp.expect("timestamp missing");
+        assert_eq!(
+            timestamp
+                .format(&Rfc3339)
+                .expect("rfc3339 formatting failed"),
+            "2026-05-29T12:34:56.789Z"
+        );
+    }
+
+    #[test]
+    fn invalid_timestamp_fails() {
+        assert!(
+            serde_json::from_str::<Iec104Message>(
+                r#"{"ioa": 1, "value": 0, "timestamp": "not-a-time"}"#
+            )
+            .is_err()
+        );
+    }
+
     // ── edge cases ────────────────────────────────────────────────────────────
 
     #[test]
@@ -299,7 +343,7 @@ mod tests {
     #[test]
     fn full_message_round_trip() {
         let msg = parse(
-            r#"{"ioa": 100, "value": 42.5, "type": "float", "ca": 1, "quality": "good", "cot": "spontaneous"}"#,
+            r#"{"ioa": 100, "value": 42.5, "type": "float", "ca": 1, "quality": "good", "cot": "spontaneous", "timestamp": "2026-05-29T12:34:56Z"}"#,
         );
         assert_eq!(msg.ioa, 100);
         assert_eq!(msg.value, DataValue::Number(42.5));
@@ -307,5 +351,6 @@ mod tests {
         assert_eq!(msg.ca, Some(1));
         assert_eq!(msg.quality, QualityField::Good);
         assert_eq!(msg.cot, CotField::Spontaneous);
+        assert!(msg.timestamp.is_some());
     }
 }

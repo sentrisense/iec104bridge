@@ -11,6 +11,7 @@ def main() -> int:
         "ioa": 1001,
         "value": 132.4,
         "type": "float",
+        "timestamp": "2026-06-01T12:34:56.789Z",
     }
 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:

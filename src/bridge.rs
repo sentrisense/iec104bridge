@@ -14,9 +14,11 @@
 //! ```
 
 use lib60870::server::Server;
+use lib60870::time::Timestamp;
 use lib60870::types::{CauseOfTransmission, Quality};
 use tracing::{debug, warn};
 
+use crate::asdu;
 use crate::message::{CotField, DataType, DataValue, Iec104Message, QualityField};
 
 // ─── DataSink trait ───────────────────────────────────────────────────────────
@@ -53,6 +55,19 @@ pub trait DataSink {
         value: i16,
         quality: Quality,
     );
+
+    fn enqueue_timed(&self, message: TimedDispatch<'_>);
+}
+
+pub struct TimedDispatch<'a> {
+    pub server_ptr: Option<lib60870::sys::CS104_Slave>,
+    pub cot: CauseOfTransmission,
+    pub ca: u16,
+    pub ioa: u32,
+    pub value: &'a DataValue,
+    pub data_type: DataType,
+    pub quality: Quality,
+    pub timestamp: &'a Timestamp,
 }
 
 // ─── LiveSink ─────────────────────────────────────────────────────────────────
@@ -95,6 +110,16 @@ impl DataSink for LiveSink<'_> {
         quality: Quality,
     ) {
         self.0.send_measured_scaled(cot, ca, ioa, value, quality);
+    }
+
+    fn enqueue_timed(&self, message: TimedDispatch<'_>) {
+        let message = TimedDispatch {
+            server_ptr: Some(self.0.as_ptr()),
+            ..message
+        };
+        if !asdu::enqueue_timed_asdu(message) {
+            warn!("Failed to enqueue timed IEC-104 ASDU");
+        }
     }
 }
 
@@ -185,6 +210,7 @@ struct DispatchContext {
     quality: Quality,
     cot: CauseOfTransmission,
     data_type: DataType,
+    timestamp: Option<Timestamp>,
 }
 
 impl DispatchContext {
@@ -195,11 +221,30 @@ impl DispatchContext {
             quality: map_quality(msg.quality),
             cot: map_cot(msg.cot),
             data_type: msg.data_type.unwrap_or_else(|| infer_type(&msg.value)),
+            timestamp: msg.timestamp.map(offset_datetime_to_cp56_timestamp),
         }
     }
 }
 
+fn offset_datetime_to_cp56_timestamp(timestamp: time::OffsetDateTime) -> Timestamp {
+    Timestamp::from_ms(timestamp.unix_timestamp_nanos() as u64 / 1_000_000)
+}
+
 fn dispatch_single_point<S: DataSink>(sink: &S, context: &DispatchContext, value: &DataValue) {
+    if let Some(timestamp) = context.timestamp.as_ref() {
+        sink.enqueue_timed(TimedDispatch {
+            server_ptr: None,
+            cot: context.cot,
+            ca: context.ca,
+            ioa: context.ioa,
+            value,
+            data_type: DataType::SinglePoint,
+            quality: context.quality,
+            timestamp,
+        });
+        return;
+    }
+
     sink.send_single_point(
         context.cot,
         context.ca,
@@ -210,6 +255,20 @@ fn dispatch_single_point<S: DataSink>(sink: &S, context: &DispatchContext, value
 }
 
 fn dispatch_float_like<S: DataSink>(sink: &S, context: &DispatchContext, value: &DataValue) {
+    if let Some(timestamp) = context.timestamp.as_ref() {
+        sink.enqueue_timed(TimedDispatch {
+            server_ptr: None,
+            cot: context.cot,
+            ca: context.ca,
+            ioa: context.ioa,
+            value,
+            data_type: context.data_type,
+            quality: context.quality,
+            timestamp,
+        });
+        return;
+    }
+
     sink.send_measured_float(
         context.cot,
         context.ca,
@@ -220,6 +279,20 @@ fn dispatch_float_like<S: DataSink>(sink: &S, context: &DispatchContext, value: 
 }
 
 fn dispatch_scaled<S: DataSink>(sink: &S, context: &DispatchContext, value: &DataValue) {
+    if let Some(timestamp) = context.timestamp.as_ref() {
+        sink.enqueue_timed(TimedDispatch {
+            server_ptr: None,
+            cot: context.cot,
+            ca: context.ca,
+            ioa: context.ioa,
+            value,
+            data_type: DataType::Scaled,
+            quality: context.quality,
+            timestamp,
+        });
+        return;
+    }
+
     sink.send_measured_scaled(
         context.cot,
         context.ca,
@@ -282,9 +355,10 @@ fn as_scaled_value(value: &DataValue) -> i16 {
 pub(crate) mod test_support {
     use std::cell::RefCell;
 
-    use lib60870::types::{CauseOfTransmission, Quality};
+    use lib60870::types::{CauseOfTransmission, Quality, TypeId};
 
-    use crate::bridge::DataSink;
+    use crate::bridge::{DataSink, TimedDispatch};
+    use crate::message::{DataType, DataValue};
 
     /// Records every call made through [`DataSink`] so tests can assert on the
     /// exact sequence and arguments.
@@ -310,6 +384,15 @@ pub(crate) mod test_support {
             ioa: u32,
             value: i16,
             quality: Quality,
+        },
+        Timed {
+            cot: CauseOfTransmission,
+            ca: u16,
+            ioa: u32,
+            data_type: TypeId,
+            value: DataValue,
+            quality: Quality,
+            timestamp_ms: u64,
         },
     }
 
@@ -369,6 +452,24 @@ pub(crate) mod test_support {
                 quality,
             });
         }
+
+        fn enqueue_timed(&self, message: TimedDispatch<'_>) {
+            let type_id = match message.data_type {
+                DataType::SinglePoint => TypeId::SinglePointTime,
+                DataType::DoublePoint => TypeId::DoublePointTime,
+                DataType::Scaled => TypeId::MeasuredScaledTime,
+                DataType::Float | DataType::Normalized => TypeId::MeasuredFloatTime,
+            };
+            self.calls.borrow_mut().push(SentCall::Timed {
+                cot: message.cot,
+                ca: message.ca,
+                ioa: message.ioa,
+                data_type: type_id,
+                value: message.value.clone(),
+                quality: message.quality,
+                timestamp_ms: message.timestamp.as_ms(),
+            });
+        }
     }
 }
 
@@ -376,7 +477,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use lib60870::types::{CauseOfTransmission, Quality};
+    use lib60870::types::{CauseOfTransmission, Quality, TypeId};
 
     use super::test_support::{CapturingSink, SentCall};
     use super::*;
@@ -399,6 +500,7 @@ mod tests {
             quality,
             cot,
             ca,
+            timestamp: None,
         }
     }
 
@@ -885,5 +987,85 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn dispatch_timestamped_float_uses_timed_type() {
+        let mut msg = simple_float(10, 42.5);
+        msg.timestamp = Some(time::OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(1));
+
+        let sink = CapturingSink::default();
+        dispatch(&sink, &msg, 1);
+
+        assert!(matches!(
+            sink.calls.borrow()[0],
+            SentCall::Timed {
+                ioa: 10,
+                data_type: TypeId::MeasuredFloatTime,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dispatch_timestamped_scaled_uses_timed_type() {
+        let mut msg = make_msg(
+            11,
+            DataValue::Number(5.0),
+            Some(DataType::Scaled),
+            QualityField::Good,
+            CotField::Spontaneous,
+            None,
+        );
+        msg.timestamp = Some(time::OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(2));
+
+        let sink = CapturingSink::default();
+        dispatch(&sink, &msg, 1);
+
+        assert!(matches!(
+            sink.calls.borrow()[0],
+            SentCall::Timed {
+                ioa: 11,
+                data_type: TypeId::MeasuredScaledTime,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dispatch_timestamp_offsets_for_same_instant_produce_same_iec_timestamp() {
+        let mut utc_message = simple_float(12, 1.5);
+        utc_message.timestamp = Some(
+            time::OffsetDateTime::parse(
+                "2026-06-01T12:34:56.789Z",
+                &time::format_description::well_known::Rfc3339,
+            )
+            .unwrap(),
+        );
+
+        let mut offset_message = simple_float(12, 1.5);
+        offset_message.timestamp = Some(
+            time::OffsetDateTime::parse(
+                "2026-06-01T14:34:56.789+02:00",
+                &time::format_description::well_known::Rfc3339,
+            )
+            .unwrap(),
+        );
+
+        let utc_sink = CapturingSink::default();
+        dispatch(&utc_sink, &utc_message, 1);
+        let offset_sink = CapturingSink::default();
+        dispatch(&offset_sink, &offset_message, 1);
+
+        let utc_timestamp_ms = match utc_sink.calls.borrow()[0] {
+            SentCall::Timed { timestamp_ms, .. } => timestamp_ms,
+            ref call => panic!("expected timed dispatch, got {call:?}"),
+        };
+        let offset_timestamp_ms = match offset_sink.calls.borrow()[0] {
+            SentCall::Timed { timestamp_ms, .. } => timestamp_ms,
+            ref call => panic!("expected timed dispatch, got {call:?}"),
+        };
+
+        assert_eq!(utc_timestamp_ms, offset_timestamp_ms);
     }
 }
