@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Sentrisense
 
-use lib60870::asdu::Asdu;
 use lib60870::sys;
 use lib60870::time::Timestamp;
 use lib60870::types::Quality;
@@ -9,8 +8,10 @@ use lib60870::types::Quality;
 use crate::bridge::TimedDispatch;
 use crate::message::{DataType, DataValue};
 
-pub fn build_timed_asdu(message: TimedDispatch<'_>) -> Option<Asdu> {
-    let server_ptr = message.server_ptr?;
+pub fn enqueue_timed_asdu(message: TimedDispatch<'_>) -> bool {
+    let Some(server_ptr) = message.server_ptr else {
+        return false;
+    };
     let app_layer_params = unsafe { sys::CS104_Slave_getAppLayerParameters(server_ptr) };
     let asdu = unsafe {
         sys::CS101_ASDU_create(
@@ -24,7 +25,7 @@ pub fn build_timed_asdu(message: TimedDispatch<'_>) -> Option<Asdu> {
         )
     };
     if asdu.is_null() {
-        return None;
+        return false;
     }
 
     let io = unsafe {
@@ -38,16 +39,17 @@ pub fn build_timed_asdu(message: TimedDispatch<'_>) -> Option<Asdu> {
     };
     if io.is_null() {
         unsafe { sys::CS101_ASDU_destroy(asdu) };
-        return None;
+        return false;
     }
 
     unsafe {
         sys::CS101_ASDU_addInformationObject(asdu, io);
         sys::InformationObject_destroy(io);
-        let owned = Asdu::clone_from_ptr(asdu);
+        sys::CS104_Slave_enqueueASDU(server_ptr, asdu);
         sys::CS101_ASDU_destroy(asdu);
-        owned
     }
+
+    true
 }
 
 unsafe fn create_information_object(

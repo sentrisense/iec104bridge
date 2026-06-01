@@ -117,9 +117,7 @@ impl DataSink for LiveSink<'_> {
             server_ptr: Some(self.0.as_ptr()),
             ..message
         };
-        if let Some(asdu) = asdu::build_timed_asdu(message) {
-            self.0.enqueue_asdu(&asdu);
-        }
+        let _ = asdu::enqueue_timed_asdu(message);
     }
 }
 
@@ -1030,5 +1028,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn dispatch_timestamp_offsets_for_same_instant_produce_same_iec_timestamp() {
+        let mut utc_message = simple_float(12, 1.5);
+        utc_message.timestamp = Some(
+            time::OffsetDateTime::parse(
+                "2026-06-01T12:34:56.789Z",
+                &time::format_description::well_known::Rfc3339,
+            )
+            .unwrap(),
+        );
+
+        let mut offset_message = simple_float(12, 1.5);
+        offset_message.timestamp = Some(
+            time::OffsetDateTime::parse(
+                "2026-06-01T14:34:56.789+02:00",
+                &time::format_description::well_known::Rfc3339,
+            )
+            .unwrap(),
+        );
+
+        let utc_sink = CapturingSink::default();
+        dispatch(&utc_sink, &utc_message, 1);
+        let offset_sink = CapturingSink::default();
+        dispatch(&offset_sink, &offset_message, 1);
+
+        let utc_timestamp_ms = match utc_sink.calls.borrow()[0] {
+            SentCall::Timed { timestamp_ms, .. } => timestamp_ms,
+            ref call => panic!("expected timed dispatch, got {call:?}"),
+        };
+        let offset_timestamp_ms = match offset_sink.calls.borrow()[0] {
+            SentCall::Timed { timestamp_ms, .. } => timestamp_ms,
+            ref call => panic!("expected timed dispatch, got {call:?}"),
+        };
+
+        assert_eq!(utc_timestamp_ms, offset_timestamp_ms);
     }
 }

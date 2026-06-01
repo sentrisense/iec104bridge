@@ -45,6 +45,16 @@ This demo remains intentionally NATS-based. The new `INPUT_TRANSPORT=unix_socket
 mode is aimed at single-host deployments where a companion process pushes values
 directly into the bridge without running a broker.
 
+For manual Unix-socket timestamp verification outside the NATS demo stack, use:
+
+```bash
+mkdir -p "$XDG_RUNTIME_DIR/iec104bridge"
+nix develop -c python demo/scraper/print_messages.py
+```
+
+The script prints decoded IEC ASDUs to stdout, including CP56Time2a timestamps
+for timed types (`M_SP_TB_1`, `M_ME_TD_1`, `M_ME_TE_1`, `M_ME_TF_1`).
+
 | Service             | URL                             | Notes                              |
 |---------------------|---------------------------------|------------------------------------|
 | Grafana             | http://localhost:3000           | admin / admin for edit access      |

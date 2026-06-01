@@ -279,10 +279,10 @@ def _session(write_api):
             points = decode_asdu(apdu[6:])
             if points:
                 write_points(write_api, points)
-            if rr % 8 == 0:
-                sock.sendall(make_s_frame(rr))
+            # Ack every received I-frame so the bridge does not hold a trailing
+            # set of GI responses open waiting for a batch-sized acknowledgment.
+            sock.sendall(make_s_frame(rr))
 
 
 if __name__ == "__main__":
     run()
-

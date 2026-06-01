@@ -14,52 +14,52 @@
 
 # ── Power Line 1 (CA=1) ───────────────────────────────────────────────────────
 # Span temperatures (M_ME_NC_1)
-{"ca": 1, "ioa": 1001, "type": "float", "value": 67.43, "quality": "good"}
-{"ca": 1, "ioa": 1002, "type": "float", "value": 65.81, "quality": "good"}
-{"ca": 1, "ioa": 1003, "type": "float", "value": 68.12, "quality": "good"}
-{"ca": 1, "ioa": 1004, "type": "float", "value": 66.55, "quality": "good"}
-{"ca": 1, "ioa": 1005, "type": "float", "value": 67.03, "quality": "good"}
-{"ca": 1, "ioa": 1006, "type": "float", "value": 64.78, "quality": "good"}
-{"ca": 1, "ioa": 1007, "type": "float", "value": 66.99, "quality": "good"}
-{"ca": 1, "ioa": 1008, "type": "float", "value": 65.44, "quality": "good"}
-{"ca": 1, "ioa": 1009, "type": "float", "value": 67.20, "quality": "not_topical"}
-{"ca": 1, "ioa": 1010, "type": "float", "value": 66.01, "quality": "invalid"}
+{"ca": 1, "ioa": 1001, "type": "float", "value": 67.43, "quality": "good", "timestamp": "2026-06-01T12:00:01Z"}
+{"ca": 1, "ioa": 1002, "type": "float", "value": 65.81, "quality": "good", "timestamp": "2026-06-01T12:00:02Z"}
+{"ca": 1, "ioa": 1003, "type": "float", "value": 68.12, "quality": "good", "timestamp": "2026-06-01T12:00:03Z"}
+{"ca": 1, "ioa": 1004, "type": "float", "value": 66.55, "quality": "good", "timestamp": "2026-06-01T12:00:04Z"}
+{"ca": 1, "ioa": 1005, "type": "float", "value": 67.03, "quality": "good", "timestamp": "2026-06-01T12:00:05Z"}
+{"ca": 1, "ioa": 1006, "type": "float", "value": 64.78, "quality": "good", "timestamp": "2026-06-01T12:00:06Z"}
+{"ca": 1, "ioa": 1007, "type": "float", "value": 66.99, "quality": "good", "timestamp": "2026-06-01T12:00:07Z"}
+{"ca": 1, "ioa": 1008, "type": "float", "value": 65.44, "quality": "good", "timestamp": "2026-06-01T12:00:08Z"}
+{"ca": 1, "ioa": 1009, "type": "float", "value": 67.20, "quality": "not_topical", "timestamp": "2026-06-01T12:00:09Z"}
+{"ca": 1, "ioa": 1010, "type": "float", "value": 66.01, "quality": "invalid", "timestamp": "2026-06-01T12:00:10Z"}
 # Span ampacities (M_ME_NB_1)
-{"ca": 1, "ioa": 2001, "type": "scaled", "value": 503, "quality": "good"}
-{"ca": 1, "ioa": 2002, "type": "scaled", "value": 517, "quality": "good"}
-{"ca": 1, "ioa": 2003, "type": "scaled", "value": 498, "quality": "good"}
-{"ca": 1, "ioa": 2004, "type": "scaled", "value": 511, "quality": "good"}
-{"ca": 1, "ioa": 2005, "type": "scaled", "value": 506, "quality": "good"}
-{"ca": 1, "ioa": 2006, "type": "scaled", "value": 522, "quality": "good"}
-{"ca": 1, "ioa": 2007, "type": "scaled", "value": 507, "quality": "good"}
-{"ca": 1, "ioa": 2008, "type": "scaled", "value": 515, "quality": "good"}
-{"ca": 1, "ioa": 2009, "type": "scaled", "value": 505, "quality": "not_topical"}
-{"ca": 1, "ioa": 2010, "type": "scaled", "value": 509, "quality": "invalid"}
+{"ca": 1, "ioa": 2001, "type": "scaled", "value": 503, "quality": "good", "timestamp": "2026-06-01T12:01:01Z"}
+{"ca": 1, "ioa": 2002, "type": "scaled", "value": 517, "quality": "good", "timestamp": "2026-06-01T12:01:02Z"}
+{"ca": 1, "ioa": 2003, "type": "scaled", "value": 498, "quality": "good", "timestamp": "2026-06-01T12:01:03Z"}
+{"ca": 1, "ioa": 2004, "type": "scaled", "value": 511, "quality": "good", "timestamp": "2026-06-01T12:01:04Z"}
+{"ca": 1, "ioa": 2005, "type": "scaled", "value": 506, "quality": "good", "timestamp": "2026-06-01T12:01:05Z"}
+{"ca": 1, "ioa": 2006, "type": "scaled", "value": 522, "quality": "good", "timestamp": "2026-06-01T12:01:06Z"}
+{"ca": 1, "ioa": 2007, "type": "scaled", "value": 507, "quality": "good", "timestamp": "2026-06-01T12:01:07Z"}
+{"ca": 1, "ioa": 2008, "type": "scaled", "value": 515, "quality": "good", "timestamp": "2026-06-01T12:01:08Z"}
+{"ca": 1, "ioa": 2009, "type": "scaled", "value": 505, "quality": "not_topical", "timestamp": "2026-06-01T12:01:09Z"}
+{"ca": 1, "ioa": 2010, "type": "scaled", "value": 509, "quality": "invalid", "timestamp": "2026-06-01T12:01:10Z"}
 # Line ampacity = min of valid spans (span 3 @ 498 A)
-{"ca": 1, "ioa": 3001, "type": "scaled", "value": 498, "quality": "good"}
+{"ca": 1, "ioa": 3001, "type": "scaled", "value": 498, "quality": "good", "timestamp": "2026-06-01T12:02:00Z"}
 
 # ── Power Line 2 (CA=2) ───────────────────────────────────────────────────────
 # Span temperatures (M_ME_NC_1)
-{"ca": 2, "ioa": 1001, "type": "float", "value": 75.62, "quality": "good"}
-{"ca": 2, "ioa": 1002, "type": "float", "value": 73.88, "quality": "good"}
-{"ca": 2, "ioa": 1003, "type": "float", "value": 76.45, "quality": "good"}
-{"ca": 2, "ioa": 1004, "type": "float", "value": 74.11, "quality": "good"}
-{"ca": 2, "ioa": 1005, "type": "float", "value": 75.03, "quality": "good"}
-{"ca": 2, "ioa": 1006, "type": "float", "value": 73.30, "quality": "good"}
-{"ca": 2, "ioa": 1007, "type": "float", "value": 74.87, "quality": "good"}
-{"ca": 2, "ioa": 1008, "type": "float", "value": 74.55, "quality": "good"}
-{"ca": 2, "ioa": 1009, "type": "float", "value": 75.19, "quality": "not_topical"}
-{"ca": 2, "ioa": 1010, "type": "float", "value": 74.72, "quality": "invalid"}
+{"ca": 2, "ioa": 1001, "type": "float", "value": 75.62, "quality": "good", "timestamp": "2026-06-01T12:10:01Z"}
+{"ca": 2, "ioa": 1002, "type": "float", "value": 73.88, "quality": "good", "timestamp": "2026-06-01T12:10:02Z"}
+{"ca": 2, "ioa": 1003, "type": "float", "value": 76.45, "quality": "good", "timestamp": "2026-06-01T12:10:03Z"}
+{"ca": 2, "ioa": 1004, "type": "float", "value": 74.11, "quality": "good", "timestamp": "2026-06-01T12:10:04Z"}
+{"ca": 2, "ioa": 1005, "type": "float", "value": 75.03, "quality": "good", "timestamp": "2026-06-01T12:10:05Z"}
+{"ca": 2, "ioa": 1006, "type": "float", "value": 73.30, "quality": "good", "timestamp": "2026-06-01T12:10:06Z"}
+{"ca": 2, "ioa": 1007, "type": "float", "value": 74.87, "quality": "good", "timestamp": "2026-06-01T12:10:07Z"}
+{"ca": 2, "ioa": 1008, "type": "float", "value": 74.55, "quality": "good", "timestamp": "2026-06-01T12:10:08Z"}
+{"ca": 2, "ioa": 1009, "type": "float", "value": 75.19, "quality": "not_topical", "timestamp": "2026-06-01T12:10:09Z"}
+{"ca": 2, "ioa": 1010, "type": "float", "value": 74.72, "quality": "invalid", "timestamp": "2026-06-01T12:10:10Z"}
 # Span ampacities (M_ME_NB_1)
-{"ca": 2, "ioa": 2001, "type": "scaled", "value": 463, "quality": "good"}
-{"ca": 2, "ioa": 2002, "type": "scaled", "value": 471, "quality": "good"}
-{"ca": 2, "ioa": 2003, "type": "scaled", "value": 458, "quality": "good"}
-{"ca": 2, "ioa": 2004, "type": "scaled", "value": 469, "quality": "good"}
-{"ca": 2, "ioa": 2005, "type": "scaled", "value": 464, "quality": "good"}
-{"ca": 2, "ioa": 2006, "type": "scaled", "value": 477, "quality": "good"}
-{"ca": 2, "ioa": 2007, "type": "scaled", "value": 465, "quality": "good"}
-{"ca": 2, "ioa": 2008, "type": "scaled", "value": 467, "quality": "good"}
-{"ca": 2, "ioa": 2009, "type": "scaled", "value": 462, "quality": "not_topical"}
-{"ca": 2, "ioa": 2010, "type": "scaled", "value": 461, "quality": "invalid"}
+{"ca": 2, "ioa": 2001, "type": "scaled", "value": 463, "quality": "good", "timestamp": "2026-06-01T12:11:01Z"}
+{"ca": 2, "ioa": 2002, "type": "scaled", "value": 471, "quality": "good", "timestamp": "2026-06-01T12:11:02Z"}
+{"ca": 2, "ioa": 2003, "type": "scaled", "value": 458, "quality": "good", "timestamp": "2026-06-01T12:11:03Z"}
+{"ca": 2, "ioa": 2004, "type": "scaled", "value": 469, "quality": "good", "timestamp": "2026-06-01T12:11:04Z"}
+{"ca": 2, "ioa": 2005, "type": "scaled", "value": 464, "quality": "good", "timestamp": "2026-06-01T12:11:05Z"}
+{"ca": 2, "ioa": 2006, "type": "scaled", "value": 477, "quality": "good", "timestamp": "2026-06-01T12:11:06Z"}
+{"ca": 2, "ioa": 2007, "type": "scaled", "value": 465, "quality": "good", "timestamp": "2026-06-01T12:11:07Z"}
+{"ca": 2, "ioa": 2008, "type": "scaled", "value": 467, "quality": "good", "timestamp": "2026-06-01T12:11:08Z"}
+{"ca": 2, "ioa": 2009, "type": "scaled", "value": 462, "quality": "not_topical", "timestamp": "2026-06-01T12:11:09Z"}
+{"ca": 2, "ioa": 2010, "type": "scaled", "value": 461, "quality": "invalid", "timestamp": "2026-06-01T12:11:10Z"}
 # Line ampacity = min of valid spans (span 3 @ 458 A)
-{"ca": 2, "ioa": 3001, "type": "scaled", "value": 458, "quality": "good"}
+{"ca": 2, "ioa": 3001, "type": "scaled", "value": 458, "quality": "good", "timestamp": "2026-06-01T12:12:00Z"}

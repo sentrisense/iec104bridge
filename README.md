@@ -189,7 +189,7 @@ corresponding ASDU to all connected clients.
 | `ca` | integer | `IEC104_CA` env var | **Common Address** — identifies the outstation.  Matches the CA the client filters on.  Range: 1 – 65 534. |
 | `quality` | string | `"good"` | **Quality Descriptor** flags to attach to the measurement.  See Quality values below. |
 | `cot` | string | `"spontaneous"` | **Cause of Transmission** — why this value is being sent.  Most upstream systems set `"spontaneous"` for live updates or `"periodic"` for timed scans. |
-| `timestamp` | RFC3339 UTC string | omitted | **Source timestamp** for the value. When present the bridge emits the CP56Time2a-tagged IEC-104 variant for the selected point type and preserves the timestamp for GI replay. |
+| `timestamp` | RFC3339 timestamp with timezone/offset | omitted | **Source timestamp** for the value. When present the bridge emits the CP56Time2a-tagged IEC-104 variant for the selected point type and preserves the timestamp for GI replay. |
 
 ### `"type"` values
 
@@ -367,6 +367,7 @@ The bridge will:
 ### Local Unix-socket mode
 
 ```bash
+mkdir -p /run/iec104bridge
 export INPUT_TRANSPORT=unix_socket
 export UNIX_SOCKET_PATH=/run/iec104bridge/input.sock
 export UNIX_SOCKET_ALLOWED_UID=$(id -u bridge-publisher)
@@ -394,6 +395,51 @@ Or use the bundled Python example:
 ```bash
 python examples/unix_socket_sender.py /run/iec104bridge/input.sock
 ```
+
+### Manual timestamp verification
+
+Use the bundled stdout scraper to confirm that timestamped Unix-socket input is
+emitted as timed IEC ASDUs with CP56Time2a timestamps.
+
+1. Start the bridge in Unix-socket mode:
+
+```bash
+mkdir -p "$XDG_RUNTIME_DIR/iec104bridge"
+export INPUT_TRANSPORT=unix_socket
+export UNIX_SOCKET_PATH="$XDG_RUNTIME_DIR/iec104bridge/input.sock"
+export IEC104_PORT=2404
+export IEC104_CA=1
+nix develop -c cargo run
+```
+
+2. In a second shell, start the stdout scraper and issue one GI for CA 1:
+
+```bash
+BRIDGE_HOST=127.0.0.1 BRIDGE_PORT=2404 GI_INTERVAL=0 GI_CAS=1 \
+  nix develop -c python demo/scraper/print_messages.py
+```
+
+3. In a third shell, send a timestamped socket message:
+
+```bash
+python examples/unix_socket_sender.py "$XDG_RUNTIME_DIR/iec104bridge/input.sock"
+```
+
+4. In the scraper output, confirm you see a JSON line like this:
+
+```json
+{"ca": 1, "ioa": 1001, "type_id": 36, "cot": 3, "value": 132.4, "qds": 0, "timestamp": "2026-06-01T12:34:56.789Z"}
+```
+
+Expected values:
+- `type_id: 36` means `M_ME_TF_1` (timed float)
+- `timestamp` must match the timestamp from the socket JSON
+- `cot: 3` means spontaneous
+- `qds: 0` means good quality
+
+The bridge only applies `0750` permissions when it creates the socket parent
+directory itself. For existing directories such as `/tmp` or `/run`, it leaves
+the parent mode unchanged and only applies `0660` to the socket file.
 
 ### Unix-socket protocol
 
