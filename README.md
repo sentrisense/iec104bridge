@@ -245,6 +245,7 @@ All configuration is via environment variables.
 | `INPUT_TRANSPORT` | `nats` | Upstream input transport: `nats` or `unix_socket` |
 | `IEC104_PORT` | `2404` | TCP port for the IEC-104 server |
 | `IEC104_CA` | `1` | Default Common Address when the message omits `"ca"` |
+| `IEC104_GI_ONLY` | `false` | When `true`, cache updates silently and serve points only on General Interrogation |
 | `IEC104_BIND_ADDR` | `0.0.0.0` | Interface to bind on (overridden to `127.0.0.1` when TLS is enabled) |
 | `METRICS_PORT` | `9091` | TCP port for the Prometheus metrics HTTP endpoint |
 | `RUST_LOG` | `iec104bridge=info` | Log level filter (uses `tracing-subscriber`) |
