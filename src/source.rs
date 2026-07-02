@@ -38,7 +38,9 @@ pub struct IncomingMessage {
 }
 
 impl IncomingMessage {
-    /// Create a message that requires no acknowledgement (e.g. test sources).
+    /// Create a message that requires no acknowledgement. Only test sources
+    /// produce un-acked messages, so this is test-only.
+    #[cfg(test)]
     pub fn new(message: Iec104Message) -> Self {
         Self {
             message,
