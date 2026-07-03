@@ -48,6 +48,34 @@ The bridge maintains a **data cache** keyed by `(ca, ioa)`.  When a client
 sends a **General Interrogation** command the bridge replays the most recent
 value for every cached IOA.
 
+### Redundant SCADA masters
+
+The bridge runs lib60870 in its default **single redundancy group** mode. This
+is intended for exactly the common setup of **two redundant masters sharing one
+Common Address and one IOA map**, where one is the hot standby of the other:
+
+- Both masters may hold a TCP connection, but **only one is active at a time**.
+  The active master (the one that most recently sent `STARTDT`) receives
+  spontaneous updates and General Interrogation replies.
+- On **failover** — the active master drops, or the standby takes over — the
+  new master sends `STARTDT` + General Interrogation and receives the **full
+  cached state** immediately, because the cache is independent of any
+  connection. (Verified: a master connecting after another disconnects gets
+  every cached point.)
+- **Caveat:** because only one connection is active at a time, a standby that
+  *also* keeps its link active (sends `STARTDT` / polls while the primary is
+  active) will take activation away from the primary — only one will receive
+  data at any instant. True hot standby means the standby stays passive until
+  failover.
+
+If instead **both masters must be active and interrogate simultaneously** (both
+receiving data at the same time), that needs lib60870's
+`ConnectionIsRedundancyGroup` mode plus per-connection GI replies — not enabled
+today; it is a small, well-scoped change. Assigning each master a **different
+Common Address** (same IOAs) is a larger change (points held under both CAs +
+CA-filtered GI). Neither is required for standard same-CA hot-standby
+redundancy.
+
 ### Message acknowledgement
 
 - NATS JetStream messages are acknowledged **after** `bridge::dispatch()` returns

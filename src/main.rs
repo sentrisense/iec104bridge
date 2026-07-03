@@ -50,6 +50,7 @@ mod e2e_tests;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use lib60870::server::ServerBuilder;
@@ -75,6 +76,24 @@ pub struct Metrics {
     pub gi_responses: AtomicU64,
 }
 
+/// Why [`run_message_loop`] returned, so the supervisor knows whether to stop
+/// or to re-establish the input source.
+#[derive(Debug, PartialEq, Eq)]
+enum LoopOutcome {
+    /// Ctrl-C received — shut the bridge down.
+    Shutdown,
+    /// The input stream ended (source dropped, subscription closed, accept loop
+    /// gone). The IEC-104 server and its cache stay up; the source is rebuilt.
+    SourceEnded,
+}
+
+/// Backoff bounds for re-establishing the input source after it ends.
+const SOURCE_MIN_BACKOFF: Duration = Duration::from_millis(200);
+const SOURCE_MAX_BACKOFF: Duration = Duration::from_secs(5);
+/// A source that stayed up at least this long is treated as a fresh incident:
+/// the backoff resets so a later, unrelated drop reconnects promptly.
+const SOURCE_STABLE_RUN: Duration = Duration::from_secs(30);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_logging();
@@ -90,19 +109,75 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&metrics),
         Arc::clone(&data_store),
     );
-    let source = build_message_source(&config).await?;
-
-    run_message_loop(
-        source,
-        server,
-        data_store,
-        Arc::clone(&metrics),
-        config.iec104_default_ca,
-        config.iec104_gi_only,
-    )
-    .await;
+    // The input source is supervised: if it ever ends (source dropped, NATS
+    // subscription closed, accept loop gone), the IEC-104 server and its cache
+    // stay up — so clients keep getting GI replies — and the source is
+    // re-established with backoff. Only Ctrl-C stops the bridge.
+    supervise_message_source(&config, server, data_store, metrics).await?;
 
     info!("Bridge stopped");
+    Ok(())
+}
+
+/// Establish the input source and run the message loop, re-establishing the
+/// source whenever it ends, until Ctrl-C. The IEC-104 server and data cache
+/// outlive individual source instances so cached values survive a source
+/// outage. The first source build fails fast (surfacing genuine misconfig);
+/// every rebuild afterward is retried with bounded backoff.
+async fn supervise_message_source(
+    config: &Config,
+    server: SharedServer,
+    data_store: DataStore,
+    metrics: Arc<Metrics>,
+) -> anyhow::Result<()> {
+    let mut source = build_message_source(config).await?;
+    let mut backoff = SOURCE_MIN_BACKOFF;
+
+    loop {
+        let started = Instant::now();
+        let outcome = run_message_loop(
+            source,
+            Arc::clone(&server),
+            Arc::clone(&data_store),
+            Arc::clone(&metrics),
+            config.iec104_default_ca,
+            config.iec104_gi_only,
+        )
+        .await;
+
+        if outcome == LoopOutcome::Shutdown {
+            break;
+        }
+
+        if started.elapsed() >= SOURCE_STABLE_RUN {
+            backoff = SOURCE_MIN_BACKOFF;
+        }
+        warn!(
+            backoff_ms = backoff.as_millis(),
+            "input source ended; IEC-104 server stays up (cache intact), re-establishing"
+        );
+
+        // Retry building the source with backoff; Ctrl-C during the wait stops.
+        source = loop {
+            tokio::select! {
+                biased;
+                _ = tokio::signal::ctrl_c() => {
+                    server.lock().unwrap().stop();
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(backoff) => {}
+            }
+            backoff = (backoff * 2).min(SOURCE_MAX_BACKOFF);
+            match build_message_source(config).await {
+                Ok(source) => break source,
+                Err(error) => {
+                    error!(error = %error, "failed to re-establish input source; retrying");
+                }
+            }
+        };
+    }
+
+    server.lock().unwrap().stop();
     Ok(())
 }
 
@@ -354,16 +429,21 @@ async fn build_message_source(config: &Config) -> anyhow::Result<Box<dyn Message
 
 /// Drive the bridge's message loop until the stream ends or Ctrl-C is received.
 ///
-/// Extracted from `main` so it can be called with any [`MessageSource`] in
-/// integration tests.
-pub async fn run_message_loop(
+/// Returns [`LoopOutcome`] so the caller ([`supervise_message_source`]) can
+/// decide whether to shut down or re-establish the source. This function does
+/// not touch the server's lifecycle — the supervisor owns that — so the server
+/// and its cache survive across source rebuilds. A per-message receive error is
+/// logged and skipped; it does not end the loop.
+///
+/// Also callable with any [`MessageSource`] in integration tests (same crate).
+async fn run_message_loop(
     source: Box<dyn MessageSource>,
     server: Arc<Mutex<lib60870::Server>>,
     data_store: Arc<Mutex<HashMap<(u16, u32), Iec104Message>>>,
     metrics: Arc<Metrics>,
     default_ca: u16,
     gi_only: bool,
-) {
+) -> LoopOutcome {
     let mut messages = source.into_messages();
 
     loop {
@@ -373,21 +453,18 @@ pub async fn run_message_loop(
             // Graceful Ctrl-C shutdown.
             _ = tokio::signal::ctrl_c() => {
                 info!("Received shutdown signal – stopping");
-                server.lock().unwrap().stop();
-                break;
+                return LoopOutcome::Shutdown;
             }
 
             result = messages.next() => {
                 match result {
                     None => {
-                        // The source is exhausted (e.g. end of file).  The server
-                        // stays up so clients can still connect and trigger a
-                        // General Interrogation to retrieve the cached values.
-                        warn!("Message stream exhausted – IEC-104 server still active, waiting for Ctrl-C");
-                        tokio::signal::ctrl_c().await.ok();
-                        info!("Received shutdown signal – stopping");
-                        server.lock().unwrap().stop();
-                        break;
+                        // The source ended. The IEC-104 server and cache are left
+                        // untouched so clients can still trigger a General
+                        // Interrogation for the last-known values while the
+                        // supervisor re-establishes the source.
+                        warn!("Input stream ended – IEC-104 server still active; source will be re-established");
+                        return LoopOutcome::SourceEnded;
                     }
                     Some(Err(e)) => {
                         error!(error = %e, "Error receiving message");
@@ -545,10 +622,13 @@ mod tests {
         .await
         .unwrap();
 
-        let store = data_store.lock().unwrap();
-        assert_eq!(store.len(), 1);
-        assert_eq!(store.get(&(7, 100)), Some(&message));
-        drop(store);
+        // Scope the std MutexGuard so it is released before the await below
+        // (an `await` while holding a std lock is a clippy/deadlock hazard).
+        {
+            let store = data_store.lock().unwrap();
+            assert_eq!(store.len(), 1);
+            assert_eq!(store.get(&(7, 100)), Some(&message));
+        }
 
         assert!(*acked.lock().await);
         assert_eq!(metrics.messages_dispatched.load(Ordering::Relaxed), 0);
