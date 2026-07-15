@@ -80,6 +80,12 @@ pub struct Config {
     ///
     /// Set via `IEC104_GI_ONLY=true` (default: `false`).
     pub iec104_gi_only: bool,
+    /// lib60870 outbound ASDU queue capacity (low and high priority).
+    ///
+    /// A General Interrogation enqueues the whole point cache in one burst;
+    /// the queue must hold at least the full point set or lib60870 silently
+    /// drops the oldest entries. Set via `IEC104_QUEUE_SIZE` (default: `1024`).
+    pub iec104_queue_size: u16,
 
     // ── Observability ─────────────────────────────────────────────────────────
     /// TCP port for the Prometheus metrics HTTP endpoint (default: `9091`).
@@ -119,7 +125,7 @@ pub struct Config {
 
 type NatsConfigParts = (String, String, String, Option<String>, Option<String>);
 type UnixSocketConfigParts = (String, Option<u32>, Option<u32>, usize);
-type ServerConfigParts = (String, u16, u16, bool, u16);
+type ServerConfigParts = (String, u16, u16, bool, u16, u16);
 type TlsConfigParts = (bool, Option<String>, Option<String>, Option<String>, u16);
 
 struct ConfigParts {
@@ -163,8 +169,14 @@ impl Config {
             unix_socket_allowed_gid,
             unix_socket_max_line_bytes,
         ) = parts.unix_socket;
-        let (iec104_bind_addr, iec104_port, iec104_default_ca, iec104_gi_only, metrics_port) =
-            parts.server;
+        let (
+            iec104_bind_addr,
+            iec104_port,
+            iec104_default_ca,
+            iec104_gi_only,
+            metrics_port,
+            iec104_queue_size,
+        ) = parts.server;
         let (tls_enabled, tls_cert_path, tls_key_path, tls_ca_cert_path, tls_port) = parts.tls;
 
         Ok(Self {
@@ -183,6 +195,7 @@ impl Config {
             iec104_default_ca,
             iec104_gi_only,
             metrics_port,
+            iec104_queue_size,
             tls_enabled,
             tls_cert_path,
             tls_key_path,
@@ -278,12 +291,18 @@ impl Config {
     where
         F: Fn(&str) -> Option<String>,
     {
+        let iec104_queue_size = Self::parse_with_default(get, "IEC104_QUEUE_SIZE", "1024")?;
+        if iec104_queue_size == 0 {
+            anyhow::bail!("IEC104_QUEUE_SIZE must be greater than zero");
+        }
+
         Ok((
             get("IEC104_BIND_ADDR").unwrap_or_else(|| "0.0.0.0".into()),
             Self::parse_with_default(get, "IEC104_PORT", "2404")?,
             Self::parse_with_default(get, "IEC104_CA", "1")?,
             Self::is_truthy(get("IEC104_GI_ONLY")),
             Self::parse_with_default(get, "METRICS_PORT", "9091")?,
+            iec104_queue_size,
         ))
     }
 
@@ -484,6 +503,27 @@ mod tests {
         map.insert("IEC104_PORT", "12345");
         let cfg = from_map(&map).unwrap();
         assert_eq!(cfg.iec104_port, 12345);
+    }
+
+    #[test]
+    fn default_iec104_queue_size() {
+        let cfg = from_map(&required()).unwrap();
+        assert_eq!(cfg.iec104_queue_size, 1024);
+    }
+
+    #[test]
+    fn custom_iec104_queue_size() {
+        let mut map = required();
+        map.insert("IEC104_QUEUE_SIZE", "4096");
+        let cfg = from_map(&map).unwrap();
+        assert_eq!(cfg.iec104_queue_size, 4096);
+    }
+
+    #[test]
+    fn zero_iec104_queue_size_is_error() {
+        let mut map = required();
+        map.insert("IEC104_QUEUE_SIZE", "0");
+        assert!(from_map(&map).is_err());
     }
 
     #[test]

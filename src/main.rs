@@ -237,6 +237,12 @@ fn build_iec_server(
     let mut iec_server = ServerBuilder::new()
         .local_address(&effective_iec104_bind_addr(config))
         .local_port(config.iec104_port)
+        // A GI enqueues the whole cache in one burst; an undersized queue makes
+        // lib60870 silently drop the oldest ASDUs of the interrogation reply.
+        .queue_sizes(
+            i32::from(config.iec104_queue_size),
+            i32::from(config.iec104_queue_size),
+        )
         .build()
         .ok_or_else(|| anyhow::anyhow!("Failed to build IEC-104 server"))?;
 
