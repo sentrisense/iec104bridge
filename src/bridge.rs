@@ -123,6 +123,82 @@ impl DataSink for LiveSink<'_> {
     }
 }
 
+// ─── ConnectionSink ───────────────────────────────────────────────────────────
+
+/// Sends to one master connection, in order with that connection's ACT_CON/ACT_TERM.
+pub struct ConnectionSink<'a> {
+    conn: &'a lib60870::MasterConnection,
+    failed: std::cell::Cell<usize>,
+}
+
+impl<'a> ConnectionSink<'a> {
+    pub fn new(conn: &'a lib60870::MasterConnection) -> Self {
+        Self {
+            conn,
+            failed: std::cell::Cell::new(0),
+        }
+    }
+
+    /// Points the connection's high-priority queue refused (queue full).
+    pub fn failed(&self) -> usize {
+        self.failed.get()
+    }
+
+    fn send_untimed(
+        &self,
+        cot: CauseOfTransmission,
+        ca: u16,
+        ioa: u32,
+        value: asdu::UntimedValue,
+        quality: Quality,
+    ) {
+        if !asdu::send_untimed_to_connection(self.conn.as_ptr(), cot, ca, ioa, value, quality) {
+            self.failed.set(self.failed.get() + 1);
+        }
+    }
+}
+
+impl DataSink for ConnectionSink<'_> {
+    fn send_single_point(
+        &self,
+        cot: CauseOfTransmission,
+        ca: u16,
+        ioa: u32,
+        value: bool,
+        quality: Quality,
+    ) {
+        self.send_untimed(cot, ca, ioa, asdu::UntimedValue::Single(value), quality);
+    }
+
+    fn send_measured_float(
+        &self,
+        cot: CauseOfTransmission,
+        ca: u16,
+        ioa: u32,
+        value: f32,
+        quality: Quality,
+    ) {
+        self.send_untimed(cot, ca, ioa, asdu::UntimedValue::Float(value), quality);
+    }
+
+    fn send_measured_scaled(
+        &self,
+        cot: CauseOfTransmission,
+        ca: u16,
+        ioa: u32,
+        value: i16,
+        quality: Quality,
+    ) {
+        self.send_untimed(cot, ca, ioa, asdu::UntimedValue::Scaled(value), quality);
+    }
+
+    fn enqueue_timed(&self, message: TimedDispatch<'_>) {
+        if !asdu::send_timed_to_connection(self.conn.as_ptr(), &message) {
+            self.failed.set(self.failed.get() + 1);
+        }
+    }
+}
+
 // ─── quality mapping ──────────────────────────────────────────────────────────
 
 const QUALITY_MAP: [Quality; 6] = [
