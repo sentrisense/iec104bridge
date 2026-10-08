@@ -80,6 +80,16 @@ pub struct Config {
     ///
     /// Set via `IEC104_GI_ONLY=true` (default: `false`).
     pub iec104_gi_only: bool,
+    /// Send measured values with their CP56Time2a source time (M_ME_TE_1,
+    /// M_ME_TF_1, ...). When `false` the bridge sends the untimed types
+    /// (M_ME_NB_1, M_ME_NC_1, ...); the cache still keeps the source time.
+    ///
+    /// Set via `IEC104_TIMESTAMPS=false` (default: `true`).
+    pub iec104_timestamps: bool,
+    /// Mark a point NT when its source time or its last arrival is older than this.
+    ///
+    /// Set via `IEC104_MAX_AGE_SECONDS` (default: unset = off).
+    pub iec104_max_age: Option<std::time::Duration>,
     /// lib60870 outbound ASDU queue capacity (low and high priority).
     ///
     /// A General Interrogation enqueues the whole point cache in one burst;
@@ -125,7 +135,16 @@ pub struct Config {
 
 type NatsConfigParts = (String, String, String, Option<String>, Option<String>);
 type UnixSocketConfigParts = (String, Option<u32>, Option<u32>, usize);
-type ServerConfigParts = (String, u16, u16, bool, u16, u16);
+type ServerConfigParts = (
+    String,
+    u16,
+    u16,
+    bool,
+    u16,
+    u16,
+    bool,
+    Option<std::time::Duration>,
+);
 type TlsConfigParts = (bool, Option<String>, Option<String>, Option<String>, u16);
 
 struct ConfigParts {
@@ -176,6 +195,8 @@ impl Config {
             iec104_gi_only,
             metrics_port,
             iec104_queue_size,
+            iec104_timestamps,
+            iec104_max_age,
         ) = parts.server;
         let (tls_enabled, tls_cert_path, tls_key_path, tls_ca_cert_path, tls_port) = parts.tls;
 
@@ -196,6 +217,8 @@ impl Config {
             iec104_gi_only,
             metrics_port,
             iec104_queue_size,
+            iec104_timestamps,
+            iec104_max_age,
             tls_enabled,
             tls_cert_path,
             tls_key_path,
@@ -295,6 +318,10 @@ impl Config {
         if iec104_queue_size == 0 {
             anyhow::bail!("IEC104_QUEUE_SIZE must be greater than zero");
         }
+        let iec104_max_age: Option<u64> = Self::parse_optional(get, "IEC104_MAX_AGE_SECONDS")?;
+        if iec104_max_age == Some(0) {
+            anyhow::bail!("IEC104_MAX_AGE_SECONDS must be greater than zero");
+        }
 
         Ok((
             get("IEC104_BIND_ADDR").unwrap_or_else(|| "0.0.0.0".into()),
@@ -303,6 +330,8 @@ impl Config {
             Self::is_truthy(get("IEC104_GI_ONLY")),
             Self::parse_with_default(get, "METRICS_PORT", "9091")?,
             iec104_queue_size,
+            Self::parse_bool_with_default(get, "IEC104_TIMESTAMPS", true)?,
+            iec104_max_age.map(std::time::Duration::from_secs),
         ))
     }
 
@@ -364,6 +393,18 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    fn parse_bool_with_default<F>(get: &F, key: &str, default: bool) -> anyhow::Result<bool>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        match get(key).map(|v| v.to_lowercase()).as_deref() {
+            None => Ok(default),
+            Some("true" | "1" | "yes") => Ok(true),
+            Some("false" | "0" | "no") => Ok(false),
+            Some(other) => anyhow::bail!("{key} must be true or false, got {other:?}"),
+        }
     }
 
     fn is_truthy(value: Option<String>) -> bool {
@@ -532,6 +573,51 @@ mod tests {
         map.insert("IEC104_CA", "42");
         let cfg = from_map(&map).unwrap();
         assert_eq!(cfg.iec104_default_ca, 42);
+    }
+
+    #[test]
+    fn default_iec104_timestamps_is_true() {
+        let cfg = from_map(&required()).unwrap();
+        assert!(cfg.iec104_timestamps);
+    }
+
+    #[test]
+    fn default_iec104_max_age_is_off() {
+        let cfg = from_map(&required()).unwrap();
+        assert_eq!(cfg.iec104_max_age, None);
+    }
+
+    #[test]
+    fn custom_iec104_max_age() {
+        let mut map = required();
+        map.insert("IEC104_MAX_AGE_SECONDS", "3600");
+        let cfg = from_map(&map).unwrap();
+        assert_eq!(
+            cfg.iec104_max_age,
+            Some(std::time::Duration::from_secs(3600))
+        );
+    }
+
+    #[test]
+    fn zero_iec104_max_age_is_error() {
+        let mut map = required();
+        map.insert("IEC104_MAX_AGE_SECONDS", "0");
+        assert!(from_map(&map).is_err());
+    }
+
+    #[test]
+    fn iec104_timestamps_can_be_disabled() {
+        let mut map = required();
+        map.insert("IEC104_TIMESTAMPS", "false");
+        let cfg = from_map(&map).unwrap();
+        assert!(!cfg.iec104_timestamps);
+    }
+
+    #[test]
+    fn invalid_iec104_timestamps_is_error() {
+        let mut map = required();
+        map.insert("IEC104_TIMESTAMPS", "sometimes");
+        assert!(from_map(&map).is_err());
     }
 
     #[test]

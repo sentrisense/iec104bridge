@@ -13,6 +13,8 @@
 //! export NATS_SUBJECT_FILTER="plant.a.measurements.>"  # optional
 //! export IEC104_PORT=2404                               # optional
 //! export IEC104_CA=1                                    # optional
+//! export IEC104_TIMESTAMPS=false                       # optional
+//! export IEC104_MAX_AGE_SECONDS=3600                    # optional
 //! cargo run
 //! ```
 //!
@@ -66,7 +68,14 @@ use tls::TlsConfig;
 
 // ─── Shared metrics ───────────────────────────────────────────────────────────
 
-type DataStore = Arc<Mutex<HashMap<(u16, u32), Iec104Message>>>;
+/// A cached point plus the time it last arrived from the input.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedPoint {
+    pub message: Iec104Message,
+    pub received_at: time::OffsetDateTime,
+}
+
+type DataStore = Arc<Mutex<HashMap<(u16, u32), CachedPoint>>>;
 type SharedServer = Arc<Mutex<lib60870::Server>>;
 type ServerSlot = Arc<Mutex<Option<SharedServer>>>;
 
@@ -142,6 +151,7 @@ async fn supervise_message_source(
             Arc::clone(&metrics),
             config.iec104_default_ca,
             config.iec104_gi_only,
+            output_policy(config),
         )
         .await;
 
@@ -207,6 +217,8 @@ fn log_startup(config: &Config) {
             iec104_port = config.iec104_port,
             iec104_ca = config.iec104_default_ca,
             iec104_gi_only = config.iec104_gi_only,
+            iec104_timestamps = config.iec104_timestamps,
+            iec104_max_age_secs = ?config.iec104_max_age.map(|d| d.as_secs()),
             metrics_port = config.metrics_port,
             tls_enabled = config.tls_enabled,
             tls_port = config.tls_port,
@@ -221,11 +233,20 @@ fn log_startup(config: &Config) {
             iec104_port = config.iec104_port,
             iec104_ca = config.iec104_default_ca,
             iec104_gi_only = config.iec104_gi_only,
+            iec104_timestamps = config.iec104_timestamps,
+            iec104_max_age_secs = ?config.iec104_max_age.map(|d| d.as_secs()),
             metrics_port = config.metrics_port,
             tls_enabled = config.tls_enabled,
             tls_port = config.tls_port,
             "Starting IEC-104 bridge"
         ),
+    }
+}
+
+fn output_policy(config: &Config) -> bridge::OutputPolicy {
+    bridge::OutputPolicy {
+        send_timestamps: config.iec104_timestamps,
+        max_age: config.iec104_max_age,
     }
 }
 
@@ -255,6 +276,7 @@ fn build_iec_server(
         data_store,
         metrics,
         config.iec104_default_ca,
+        output_policy(config),
     );
 
     iec_server.start();
@@ -291,6 +313,7 @@ fn install_interrogation_handler(
     data_store: DataStore,
     metrics: Arc<Metrics>,
     default_ca: u16,
+    policy: bridge::OutputPolicy,
 ) {
     iec_server.set_interrogation_handler(
         move |conn: &lib60870::MasterConnection, asdu: lib60870::Asdu, qoi: u8| {
@@ -298,7 +321,7 @@ fn install_interrogation_handler(
             conn.send_act_con(&asdu, false);
 
             if qoi == QOI_STATION {
-                replay_cached_values(&server_slot, &data_store, default_ca);
+                replay_cached_values(&server_slot, &data_store, default_ca, &policy);
             }
 
             metrics.gi_responses.fetch_add(1, Ordering::Relaxed);
@@ -308,14 +331,21 @@ fn install_interrogation_handler(
     );
 }
 
-fn replay_cached_values(server_slot: &ServerSlot, data_store: &DataStore, default_ca: u16) {
+fn replay_cached_values(
+    server_slot: &ServerSlot,
+    data_store: &DataStore,
+    default_ca: u16,
+    policy: &bridge::OutputPolicy,
+) {
     if let Some(server) = server_slot.lock().unwrap().as_ref().cloned() {
         let store = data_store.lock().unwrap();
         let server = server.lock().unwrap();
+        let now = time::OffsetDateTime::now_utc();
 
-        for msg in store.values() {
-            let ca = msg.ca.unwrap_or(default_ca);
-            bridge::dispatch(&bridge::LiveSink(&server), msg, ca);
+        for point in store.values() {
+            let ca = point.message.ca.unwrap_or(default_ca);
+            let out = bridge::prepare_for_output(&point.message, point.received_at, now, policy);
+            bridge::dispatch_outgoing(&bridge::LiveSink(&server), &out, ca);
         }
     }
 }
@@ -445,10 +475,11 @@ async fn build_message_source(config: &Config) -> anyhow::Result<Box<dyn Message
 async fn run_message_loop(
     source: Box<dyn MessageSource>,
     server: Arc<Mutex<lib60870::Server>>,
-    data_store: Arc<Mutex<HashMap<(u16, u32), Iec104Message>>>,
+    data_store: DataStore,
     metrics: Arc<Metrics>,
     default_ca: u16,
     gi_only: bool,
+    policy: bridge::OutputPolicy,
 ) -> LoopOutcome {
     let mut messages = source.into_messages();
 
@@ -483,6 +514,7 @@ async fn run_message_loop(
                             &metrics,
                             default_ca,
                             gi_only,
+                            policy,
                         ).await {
                             error!(error = %e, "Error processing message");
                         }
@@ -500,19 +532,28 @@ async fn handle_incoming_message(
     metrics: &Arc<Metrics>,
     default_ca: u16,
     gi_only: bool,
+    policy: bridge::OutputPolicy,
 ) -> anyhow::Result<()> {
     let ca = incoming.message.ca.unwrap_or(default_ca);
+    let now = time::OffsetDateTime::now_utc();
 
     {
         let mut store = data_store.lock().unwrap();
-        store.insert((ca, incoming.message.ioa), incoming.message.clone());
+        store.insert(
+            (ca, incoming.message.ioa),
+            CachedPoint {
+                message: incoming.message.clone(),
+                received_at: now,
+            },
+        );
     }
 
     let dispatched = if gi_only {
         false
     } else {
+        let out = bridge::prepare_for_output(&incoming.message, now, now, &policy);
         let srv = server.lock().unwrap();
-        dispatch_message_if_enabled(&bridge::LiveSink(&srv), &incoming.message, ca, gi_only)
+        dispatch_message_if_enabled(&bridge::LiveSink(&srv), &out, ca, gi_only)
     };
 
     incoming.ack().await.map_err(|e| {
@@ -528,7 +569,7 @@ async fn handle_incoming_message(
 
 fn dispatch_message_if_enabled<S: bridge::DataSink>(
     sink: &S,
-    message: &Iec104Message,
+    out: &bridge::Outgoing,
     ca: u16,
     gi_only: bool,
 ) -> bool {
@@ -536,7 +577,7 @@ fn dispatch_message_if_enabled<S: bridge::DataSink>(
         return false;
     }
 
-    bridge::dispatch(sink, message, ca);
+    bridge::dispatch_outgoing(sink, out, ca);
     true
 }
 
@@ -567,6 +608,13 @@ mod tests {
         }
     }
 
+    fn outgoing(message: Iec104Message) -> crate::bridge::Outgoing {
+        crate::bridge::Outgoing {
+            message,
+            not_topical: false,
+        }
+    }
+
     fn test_server() -> SharedServer {
         Arc::new(std::sync::Mutex::new(
             ServerBuilder::new()
@@ -580,7 +628,7 @@ mod tests {
     #[test]
     fn dispatch_message_if_enabled_skips_when_gi_only() {
         let sink = CapturingSink::default();
-        let dispatched = dispatch_message_if_enabled(&sink, &sample_message(), 7, true);
+        let dispatched = dispatch_message_if_enabled(&sink, &outgoing(sample_message()), 7, true);
 
         assert!(!dispatched);
         assert!(sink.calls.borrow().is_empty());
@@ -589,7 +637,7 @@ mod tests {
     #[test]
     fn dispatch_message_if_enabled_dispatches_when_spontaneous_enabled() {
         let sink = CapturingSink::default();
-        let dispatched = dispatch_message_if_enabled(&sink, &sample_message(), 7, false);
+        let dispatched = dispatch_message_if_enabled(&sink, &outgoing(sample_message()), 7, false);
 
         assert!(dispatched);
         assert!(matches!(
@@ -624,6 +672,7 @@ mod tests {
             &metrics,
             7,
             true,
+            crate::bridge::OutputPolicy::default(),
         )
         .await
         .unwrap();
@@ -633,10 +682,52 @@ mod tests {
         {
             let store = data_store.lock().unwrap();
             assert_eq!(store.len(), 1);
-            assert_eq!(store.get(&(7, 100)), Some(&message));
+            assert_eq!(store.get(&(7, 100)).map(|p| &p.message), Some(&message));
         }
 
         assert!(*acked.lock().await);
         assert_eq!(metrics.messages_dispatched.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn handle_incoming_message_caches_timestamp_and_arrival() {
+        let server = test_server();
+        let data_store: DataStore = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let metrics = Arc::new(Metrics::default());
+        let mut message = sample_message();
+        message.timestamp = Some(time::OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(1));
+        let before = time::OffsetDateTime::now_utc();
+
+        handle_incoming_message(
+            IncomingMessage::with_ack(message.clone(), || async { Ok(()) }),
+            &server,
+            &data_store,
+            &metrics,
+            7,
+            true,
+            crate::bridge::OutputPolicy {
+                send_timestamps: false,
+                max_age: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let store = data_store.lock().unwrap();
+        let cached = store.get(&(7, 100)).expect("cached");
+        assert_eq!(cached.message.timestamp, message.timestamp);
+        assert!(cached.received_at >= before);
+    }
+
+    #[test]
+    fn replay_with_policy_on_empty_cache_sends_nothing() {
+        let slot: super::ServerSlot = Arc::new(std::sync::Mutex::new(Some(test_server())));
+        let data_store: DataStore = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        super::replay_cached_values(
+            &slot,
+            &data_store,
+            1,
+            &crate::bridge::OutputPolicy::default(),
+        );
     }
 }

@@ -887,10 +887,9 @@ mod tests {
     use lib60870::types::{CauseOfTransmission, TypeId};
     use std::time::Duration;
 
-    use futures::StreamExt as _;
     use tempfile::tempdir;
     use time::OffsetDateTime;
-    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+    use tokio::io::BufReader;
 
     use super::*;
     use crate::bridge::dispatch;
