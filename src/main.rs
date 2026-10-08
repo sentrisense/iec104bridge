@@ -13,6 +13,8 @@
 //! export NATS_SUBJECT_FILTER="plant.a.measurements.>"  # optional
 //! export IEC104_PORT=2404                               # optional
 //! export IEC104_CA=1                                    # optional
+//! export IEC104_TIMESTAMPS=false                       # optional
+//! export IEC104_MAX_AGE_SECONDS=3600                    # optional
 //! cargo run
 //! ```
 //!

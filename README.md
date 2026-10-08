@@ -275,6 +275,8 @@ All configuration is via environment variables.
 | `IEC104_CA` | `1` | Default Common Address when the message omits `"ca"` |
 | `IEC104_GI_ONLY` | `false` | When `true`, cache updates silently and serve points only on General Interrogation |
 | `IEC104_QUEUE_SIZE` | `1024` | Outbound ASDU queue capacity; must be at least the full point count or GI replies are silently truncated |
+| `IEC104_TIMESTAMPS` | `true` | When `false`, send untimed types (M_ME_NB_1, M_ME_NC_1, M_SP_NA_1, M_DP_NA_1); the cache still keeps the source time |
+| `IEC104_MAX_AGE_SECONDS` | unset | Send a point as NT (not topical) when its source time or its last arrival is older than this; never overrides invalid |
 | `IEC104_BIND_ADDR` | `0.0.0.0` | Interface to bind on (overridden to `127.0.0.1` when TLS is enabled) |
 | `METRICS_PORT` | `9091` | TCP port for the Prometheus metrics HTTP endpoint |
 | `RUST_LOG` | `iec104bridge=info` | Log level filter (uses `tracing-subscriber`) |
