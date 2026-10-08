@@ -123,6 +123,73 @@ impl DataSink for LiveSink<'_> {
     }
 }
 
+// ─── ConnectionSink ───────────────────────────────────────────────────────────
+
+/// Sends to one master connection, in order with that connection's ACT_CON/ACT_TERM.
+pub struct ConnectionSink<'a>(pub &'a lib60870::MasterConnection);
+
+impl ConnectionSink<'_> {
+    fn send_untimed(
+        &self,
+        cot: CauseOfTransmission,
+        ca: u16,
+        ioa: u32,
+        value: asdu::UntimedValue,
+        quality: Quality,
+    ) {
+        if !asdu::send_untimed_to_connection(self.0.as_ptr(), cot, ca, ioa, value, quality) {
+            warn!(
+                ioa,
+                "Failed to send IEC-104 ASDU to the interrogating master"
+            );
+        }
+    }
+}
+
+impl DataSink for ConnectionSink<'_> {
+    fn send_single_point(
+        &self,
+        cot: CauseOfTransmission,
+        ca: u16,
+        ioa: u32,
+        value: bool,
+        quality: Quality,
+    ) {
+        self.send_untimed(cot, ca, ioa, asdu::UntimedValue::Single(value), quality);
+    }
+
+    fn send_measured_float(
+        &self,
+        cot: CauseOfTransmission,
+        ca: u16,
+        ioa: u32,
+        value: f32,
+        quality: Quality,
+    ) {
+        self.send_untimed(cot, ca, ioa, asdu::UntimedValue::Float(value), quality);
+    }
+
+    fn send_measured_scaled(
+        &self,
+        cot: CauseOfTransmission,
+        ca: u16,
+        ioa: u32,
+        value: i16,
+        quality: Quality,
+    ) {
+        self.send_untimed(cot, ca, ioa, asdu::UntimedValue::Scaled(value), quality);
+    }
+
+    fn enqueue_timed(&self, message: TimedDispatch<'_>) {
+        if !asdu::send_timed_to_connection(self.0.as_ptr(), &message) {
+            warn!(
+                ioa = message.ioa,
+                "Failed to send timed IEC-104 ASDU to the interrogating master"
+            );
+        }
+    }
+}
+
 // ─── quality mapping ──────────────────────────────────────────────────────────
 
 const QUALITY_MAP: [Quality; 6] = [

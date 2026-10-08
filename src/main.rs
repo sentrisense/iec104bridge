@@ -77,7 +77,6 @@ pub struct CachedPoint {
 
 type DataStore = Arc<Mutex<HashMap<(u16, u32), CachedPoint>>>;
 type SharedServer = Arc<Mutex<lib60870::Server>>;
-type ServerSlot = Arc<Mutex<Option<SharedServer>>>;
 
 #[derive(Debug, Default)]
 pub struct Metrics {
@@ -269,10 +268,8 @@ fn build_iec_server(
 
     install_connection_handlers(&mut iec_server);
 
-    let server_slot: ServerSlot = Arc::new(Mutex::new(None));
     install_interrogation_handler(
         &mut iec_server,
-        Arc::clone(&server_slot),
         data_store,
         metrics,
         config.iec104_default_ca,
@@ -283,7 +280,6 @@ fn build_iec_server(
     info!(port = config.iec104_port, "IEC-104 server started");
 
     let server = Arc::new(Mutex::new(iec_server));
-    *server_slot.lock().unwrap() = Some(Arc::clone(&server));
     Ok(server)
 }
 
@@ -309,7 +305,6 @@ fn install_connection_handlers(iec_server: &mut lib60870::Server) {
 
 fn install_interrogation_handler(
     iec_server: &mut lib60870::Server,
-    server_slot: ServerSlot,
     data_store: DataStore,
     metrics: Arc<Metrics>,
     default_ca: u16,
@@ -318,35 +313,43 @@ fn install_interrogation_handler(
     iec_server.set_interrogation_handler(
         move |conn: &lib60870::MasterConnection, asdu: lib60870::Asdu, qoi: u8| {
             info!(qoi, "Received station interrogation");
-            conn.send_act_con(&asdu, false);
+            let request = asdu::PinnedAsdu::copy_of(&asdu);
+            unsafe {
+                lib60870::sys::IMasterConnection_sendACT_CON(conn.as_ptr(), request.as_ptr(), false)
+            };
 
             if qoi == QOI_STATION {
-                replay_cached_values(&server_slot, &data_store, default_ca, &policy);
+                replay_cached_values(
+                    &bridge::ConnectionSink(conn),
+                    &data_store,
+                    default_ca,
+                    &policy,
+                );
             }
 
             metrics.gi_responses.fetch_add(1, Ordering::Relaxed);
-            conn.send_act_term(&asdu);
+            unsafe {
+                lib60870::sys::IMasterConnection_sendACT_TERM(conn.as_ptr(), request.as_ptr())
+            };
             true
         },
     );
 }
 
-fn replay_cached_values(
-    server_slot: &ServerSlot,
+fn replay_cached_values<S: bridge::DataSink>(
+    sink: &S,
     data_store: &DataStore,
     default_ca: u16,
     policy: &bridge::OutputPolicy,
 ) {
-    if let Some(server) = server_slot.lock().unwrap().as_ref().cloned() {
-        let store = data_store.lock().unwrap();
-        let server = server.lock().unwrap();
-        let now = time::OffsetDateTime::now_utc();
+    let store = data_store.lock().unwrap();
+    let now = time::OffsetDateTime::now_utc();
 
-        for point in store.values() {
-            let ca = point.message.ca.unwrap_or(default_ca);
-            let out = bridge::prepare_for_output(&point.message, point.received_at, now, policy);
-            bridge::dispatch_outgoing(&bridge::LiveSink(&server), &out, ca);
-        }
+    for point in store.values() {
+        let ca = point.message.ca.unwrap_or(default_ca);
+        let mut out = bridge::prepare_for_output(&point.message, point.received_at, now, policy);
+        out.message.cot = message::CotField::Interrogated;
+        bridge::dispatch_outgoing(sink, &out, ca);
     }
 }
 
@@ -721,13 +724,87 @@ mod tests {
 
     #[test]
     fn replay_with_policy_on_empty_cache_sends_nothing() {
-        let slot: super::ServerSlot = Arc::new(std::sync::Mutex::new(Some(test_server())));
+        let sink = CapturingSink::default();
         let data_store: DataStore = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        super::replay_cached_values(
-            &slot,
-            &data_store,
-            1,
-            &crate::bridge::OutputPolicy::default(),
+        let policy = crate::bridge::OutputPolicy {
+            send_timestamps: false,
+            max_age: Some(std::time::Duration::from_secs(60)),
+        };
+        super::replay_cached_values(&sink, &data_store, 1, &policy);
+        assert!(sink.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn gi_reply_sends_interrogated_values_before_act_term() {
+        use lib60870::types::{CauseOfTransmission, QOI_STATION};
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut iec_server = ServerBuilder::new()
+            .local_address("127.0.0.1")
+            .local_port(port)
+            .build()
+            .expect("server should build");
+        let data_store: DataStore = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        for ioa in [100, 101] {
+            let mut message = sample_message();
+            message.ioa = ioa;
+            data_store.lock().unwrap().insert(
+                (7, ioa),
+                super::CachedPoint {
+                    message,
+                    received_at: time::OffsetDateTime::now_utc(),
+                },
+            );
+        }
+        super::install_interrogation_handler(
+            &mut iec_server,
+            Arc::clone(&data_store),
+            Arc::new(Metrics::default()),
+            7,
+            crate::bridge::OutputPolicy::default(),
         );
+        iec_server.start();
+
+        type Received = Vec<(u8, Option<CauseOfTransmission>)>;
+        let received: Arc<std::sync::Mutex<Received>> = Arc::default();
+        let sink = Arc::clone(&received);
+        let mut client = lib60870::client::Connection::new("127.0.0.1", port).expect("client");
+        client.set_asdu_handler(move |asdu| {
+            sink.lock()
+                .unwrap()
+                .push((asdu.type_id_raw() as u8, asdu.cot()));
+            true
+        });
+        assert!(client.connect());
+        client.send_start_dt();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(client.send_interrogation(CauseOfTransmission::Activation, 7, QOI_STATION));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        client.close();
+
+        let received = received.lock().unwrap().clone();
+        let term = received
+            .iter()
+            .position(|(_, cot)| *cot == Some(CauseOfTransmission::ActivationTermination))
+            .expect("ACT_TERM received");
+        let data: Vec<_> = received
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, cot))| {
+                *cot == Some(CauseOfTransmission::InterrogatedByStation)
+                    || *cot == Some(CauseOfTransmission::Spontaneous)
+            })
+            .collect();
+        assert_eq!(data.len(), 2, "{received:?}");
+        assert_eq!(received[0], (100, Some(CauseOfTransmission::ActivationCon)));
+        assert_eq!(received[term].0, 100, "{received:?}");
+        for (index, (_, cot)) in data {
+            assert!(index < term, "data after ACT_TERM: {received:?}");
+            assert_eq!(*cot, Some(CauseOfTransmission::InterrogatedByStation));
+        }
     }
 }
