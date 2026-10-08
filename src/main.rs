@@ -66,7 +66,14 @@ use tls::TlsConfig;
 
 // ─── Shared metrics ───────────────────────────────────────────────────────────
 
-type DataStore = Arc<Mutex<HashMap<(u16, u32), Iec104Message>>>;
+/// A cached point plus the time it last arrived from the input.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedPoint {
+    pub message: Iec104Message,
+    pub received_at: time::OffsetDateTime,
+}
+
+type DataStore = Arc<Mutex<HashMap<(u16, u32), CachedPoint>>>;
 type SharedServer = Arc<Mutex<lib60870::Server>>;
 type ServerSlot = Arc<Mutex<Option<SharedServer>>>;
 
@@ -142,6 +149,7 @@ async fn supervise_message_source(
             Arc::clone(&metrics),
             config.iec104_default_ca,
             config.iec104_gi_only,
+            output_policy(config),
         )
         .await;
 
@@ -233,6 +241,13 @@ fn log_startup(config: &Config) {
     }
 }
 
+fn output_policy(config: &Config) -> bridge::OutputPolicy {
+    bridge::OutputPolicy {
+        send_timestamps: config.iec104_timestamps,
+        max_age: config.iec104_max_age,
+    }
+}
+
 fn build_iec_server(
     config: &Config,
     data_store: DataStore,
@@ -259,6 +274,7 @@ fn build_iec_server(
         data_store,
         metrics,
         config.iec104_default_ca,
+        output_policy(config),
     );
 
     iec_server.start();
@@ -295,6 +311,7 @@ fn install_interrogation_handler(
     data_store: DataStore,
     metrics: Arc<Metrics>,
     default_ca: u16,
+    policy: bridge::OutputPolicy,
 ) {
     iec_server.set_interrogation_handler(
         move |conn: &lib60870::MasterConnection, asdu: lib60870::Asdu, qoi: u8| {
@@ -302,7 +319,7 @@ fn install_interrogation_handler(
             conn.send_act_con(&asdu, false);
 
             if qoi == QOI_STATION {
-                replay_cached_values(&server_slot, &data_store, default_ca);
+                replay_cached_values(&server_slot, &data_store, default_ca, &policy);
             }
 
             metrics.gi_responses.fetch_add(1, Ordering::Relaxed);
@@ -312,14 +329,21 @@ fn install_interrogation_handler(
     );
 }
 
-fn replay_cached_values(server_slot: &ServerSlot, data_store: &DataStore, default_ca: u16) {
+fn replay_cached_values(
+    server_slot: &ServerSlot,
+    data_store: &DataStore,
+    default_ca: u16,
+    policy: &bridge::OutputPolicy,
+) {
     if let Some(server) = server_slot.lock().unwrap().as_ref().cloned() {
         let store = data_store.lock().unwrap();
         let server = server.lock().unwrap();
+        let now = time::OffsetDateTime::now_utc();
 
-        for msg in store.values() {
-            let ca = msg.ca.unwrap_or(default_ca);
-            bridge::dispatch(&bridge::LiveSink(&server), msg, ca);
+        for point in store.values() {
+            let ca = point.message.ca.unwrap_or(default_ca);
+            let msg = bridge::prepare_for_output(&point.message, point.received_at, now, policy);
+            bridge::dispatch(&bridge::LiveSink(&server), &msg, ca);
         }
     }
 }
@@ -449,10 +473,11 @@ async fn build_message_source(config: &Config) -> anyhow::Result<Box<dyn Message
 async fn run_message_loop(
     source: Box<dyn MessageSource>,
     server: Arc<Mutex<lib60870::Server>>,
-    data_store: Arc<Mutex<HashMap<(u16, u32), Iec104Message>>>,
+    data_store: DataStore,
     metrics: Arc<Metrics>,
     default_ca: u16,
     gi_only: bool,
+    policy: bridge::OutputPolicy,
 ) -> LoopOutcome {
     let mut messages = source.into_messages();
 
@@ -487,6 +512,7 @@ async fn run_message_loop(
                             &metrics,
                             default_ca,
                             gi_only,
+                            policy,
                         ).await {
                             error!(error = %e, "Error processing message");
                         }
@@ -504,19 +530,28 @@ async fn handle_incoming_message(
     metrics: &Arc<Metrics>,
     default_ca: u16,
     gi_only: bool,
+    policy: bridge::OutputPolicy,
 ) -> anyhow::Result<()> {
     let ca = incoming.message.ca.unwrap_or(default_ca);
+    let now = time::OffsetDateTime::now_utc();
 
     {
         let mut store = data_store.lock().unwrap();
-        store.insert((ca, incoming.message.ioa), incoming.message.clone());
+        store.insert(
+            (ca, incoming.message.ioa),
+            CachedPoint {
+                message: incoming.message.clone(),
+                received_at: now,
+            },
+        );
     }
 
     let dispatched = if gi_only {
         false
     } else {
+        let msg = bridge::prepare_for_output(&incoming.message, now, now, &policy);
         let srv = server.lock().unwrap();
-        dispatch_message_if_enabled(&bridge::LiveSink(&srv), &incoming.message, ca, gi_only)
+        dispatch_message_if_enabled(&bridge::LiveSink(&srv), &msg, ca, gi_only)
     };
 
     incoming.ack().await.map_err(|e| {
@@ -628,6 +663,7 @@ mod tests {
             &metrics,
             7,
             true,
+            crate::bridge::OutputPolicy::default(),
         )
         .await
         .unwrap();
@@ -637,10 +673,52 @@ mod tests {
         {
             let store = data_store.lock().unwrap();
             assert_eq!(store.len(), 1);
-            assert_eq!(store.get(&(7, 100)), Some(&message));
+            assert_eq!(store.get(&(7, 100)).map(|p| &p.message), Some(&message));
         }
 
         assert!(*acked.lock().await);
         assert_eq!(metrics.messages_dispatched.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn handle_incoming_message_caches_timestamp_and_arrival() {
+        let server = test_server();
+        let data_store: DataStore = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let metrics = Arc::new(Metrics::default());
+        let mut message = sample_message();
+        message.timestamp = Some(time::OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(1));
+        let before = time::OffsetDateTime::now_utc();
+
+        handle_incoming_message(
+            IncomingMessage::with_ack(message.clone(), || async { Ok(()) }),
+            &server,
+            &data_store,
+            &metrics,
+            7,
+            true,
+            crate::bridge::OutputPolicy {
+                send_timestamps: false,
+                max_age: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let store = data_store.lock().unwrap();
+        let cached = store.get(&(7, 100)).expect("cached");
+        assert_eq!(cached.message.timestamp, message.timestamp);
+        assert!(cached.received_at >= before);
+    }
+
+    #[test]
+    fn replay_with_policy_on_empty_cache_sends_nothing() {
+        let slot: super::ServerSlot = Arc::new(std::sync::Mutex::new(Some(test_server())));
+        let data_store: DataStore = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        super::replay_cached_values(
+            &slot,
+            &data_store,
+            1,
+            &crate::bridge::OutputPolicy::default(),
+        );
     }
 }
