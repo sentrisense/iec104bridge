@@ -8,10 +8,7 @@ use lib60870::types::Quality;
 use crate::bridge::TimedDispatch;
 use crate::message::{DataType, DataValue};
 
-/// A heap copy of a received ASDU whose internal pointers aim at its own buffer.
-///
-/// `lib60870::Asdu` moves its `sCS101_StaticASDU` after `CS101_ASDU_clone`, so the
-/// `asdu`/`payload` pointers it carries refer to a dead stack frame.
+/// Self-referencing heap copy; `lib60870::Asdu` pointers dangle after its move.
 pub struct PinnedAsdu(Box<sys::sCS101_StaticASDU>);
 
 impl PinnedAsdu {

@@ -314,23 +314,29 @@ fn install_interrogation_handler(
         move |conn: &lib60870::MasterConnection, asdu: lib60870::Asdu, qoi: u8| {
             info!(qoi, "Received station interrogation");
             let request = asdu::PinnedAsdu::copy_of(&asdu);
-            unsafe {
+            if !unsafe {
                 lib60870::sys::IMasterConnection_sendACT_CON(conn.as_ptr(), request.as_ptr(), false)
-            };
+            } {
+                error!("GI: ACT_CON not queued (high-priority queue full)");
+            }
 
             if qoi == QOI_STATION {
-                replay_cached_values(
-                    &bridge::ConnectionSink(conn),
-                    &data_store,
-                    default_ca,
-                    &policy,
-                );
+                let sink = bridge::ConnectionSink::new(conn);
+                replay_cached_values(&sink, &data_store, default_ca, &policy);
+                if sink.failed() > 0 {
+                    error!(
+                        dropped = sink.failed(),
+                        "GI reply truncated: high-priority queue full (raise IEC104_QUEUE_SIZE)"
+                    );
+                }
             }
 
             metrics.gi_responses.fetch_add(1, Ordering::Relaxed);
-            unsafe {
+            if !unsafe {
                 lib60870::sys::IMasterConnection_sendACT_TERM(conn.as_ptr(), request.as_ptr())
-            };
+            } {
+                error!("GI: ACT_TERM not queued (high-priority queue full)");
+            }
             true
         },
     );
@@ -774,16 +780,41 @@ mod tests {
         let sink = Arc::clone(&received);
         let mut client = lib60870::client::Connection::new("127.0.0.1", port).expect("client");
         client.set_asdu_handler(move |asdu| {
-            sink.lock()
-                .unwrap()
-                .push((asdu.type_id_raw() as u8, asdu.cot()));
+            let pinned = crate::asdu::PinnedAsdu::copy_of(&asdu);
+            let (type_id, cot) = unsafe {
+                (
+                    lib60870::sys::CS101_ASDU_getTypeID(pinned.as_ptr()) as u8,
+                    CauseOfTransmission::from_raw(lib60870::sys::CS101_ASDU_getCOT(
+                        pinned.as_ptr(),
+                    )),
+                )
+            };
+            sink.lock().unwrap().push((type_id, cot));
             true
         });
         assert!(client.connect());
         client.send_start_dt();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(client.send_interrogation(CauseOfTransmission::Activation, 7, QOI_STATION));
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        let wait_for = |done: &dyn Fn(&Received) -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !done(&received.lock().unwrap()) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let is_term = |r: &Received| {
+            r.iter()
+                .any(|(_, cot)| *cot == Some(CauseOfTransmission::ActivationTermination))
+        };
+        let mut sent = false;
+        for _ in 0..50 {
+            sent = client.send_interrogation(CauseOfTransmission::Activation, 7, QOI_STATION);
+            if sent {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(sent, "GI not sent");
+        wait_for(&is_term);
+        std::thread::sleep(std::time::Duration::from_millis(50));
         client.close();
 
         let received = received.lock().unwrap().clone();
