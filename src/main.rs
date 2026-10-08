@@ -312,23 +312,36 @@ fn install_interrogation_handler(
 ) {
     iec_server.set_interrogation_handler(
         move |conn: &lib60870::MasterConnection, asdu: lib60870::Asdu, qoi: u8| {
-            info!(qoi, "Received station interrogation");
             let request = asdu::PinnedAsdu::copy_of(&asdu);
+            if qoi != QOI_STATION {
+                warn!(
+                    qoi,
+                    "Group interrogation not supported; negative confirmation sent"
+                );
+                unsafe {
+                    lib60870::sys::IMasterConnection_sendACT_CON(
+                        conn.as_ptr(),
+                        request.as_ptr(),
+                        true,
+                    )
+                };
+                return true;
+            }
+
+            info!(qoi, "Received station interrogation");
             if !unsafe {
                 lib60870::sys::IMasterConnection_sendACT_CON(conn.as_ptr(), request.as_ptr(), false)
             } {
                 error!("GI: ACT_CON not queued (high-priority queue full)");
             }
 
-            if qoi == QOI_STATION {
-                let sink = bridge::ConnectionSink::new(conn);
-                replay_cached_values(&sink, &data_store, default_ca, &policy);
-                if sink.failed() > 0 {
-                    error!(
-                        dropped = sink.failed(),
-                        "GI reply truncated: high-priority queue full (raise IEC104_QUEUE_SIZE)"
-                    );
-                }
+            let sink = bridge::ConnectionSink::new(conn);
+            replay_cached_values(&sink, &data_store, default_ca, &policy);
+            if sink.failed() > 0 {
+                error!(
+                    dropped = sink.failed(),
+                    "GI reply truncated: high-priority queue full (raise IEC104_QUEUE_SIZE)"
+                );
             }
 
             metrics.gi_responses.fetch_add(1, Ordering::Relaxed);
@@ -740,9 +753,11 @@ mod tests {
         assert!(sink.calls.borrow().is_empty());
     }
 
-    #[test]
-    fn gi_reply_sends_interrogated_values_before_act_term() {
-        use lib60870::types::{CauseOfTransmission, QOI_STATION};
+    type Received = Vec<(u8, Option<lib60870::types::CauseOfTransmission>, bool)>;
+
+    /// Run one interrogation against a real server holding two cached points.
+    fn run_gi(qoi: u8, done: fn(&Received) -> bool) -> Received {
+        use lib60870::types::CauseOfTransmission;
 
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -775,67 +790,83 @@ mod tests {
         );
         iec_server.start();
 
-        type Received = Vec<(u8, Option<CauseOfTransmission>)>;
         let received: Arc<std::sync::Mutex<Received>> = Arc::default();
         let sink = Arc::clone(&received);
         let mut client = lib60870::client::Connection::new("127.0.0.1", port).expect("client");
         client.set_asdu_handler(move |asdu| {
             let pinned = crate::asdu::PinnedAsdu::copy_of(&asdu);
-            let (type_id, cot) = unsafe {
+            let entry = unsafe {
                 (
                     lib60870::sys::CS101_ASDU_getTypeID(pinned.as_ptr()) as u8,
                     CauseOfTransmission::from_raw(lib60870::sys::CS101_ASDU_getCOT(
                         pinned.as_ptr(),
                     )),
+                    lib60870::sys::CS101_ASDU_isNegative(pinned.as_ptr()),
                 )
             };
-            sink.lock().unwrap().push((type_id, cot));
+            sink.lock().unwrap().push(entry);
             true
         });
         assert!(client.connect());
         client.send_start_dt();
-        let wait_for = |done: &dyn Fn(&Received) -> bool| {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while !done(&received.lock().unwrap()) && std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        };
-        let is_term = |r: &Received| {
-            r.iter()
-                .any(|(_, cot)| *cot == Some(CauseOfTransmission::ActivationTermination))
-        };
         let mut sent = false;
         for _ in 0..50 {
-            sent = client.send_interrogation(CauseOfTransmission::Activation, 7, QOI_STATION);
+            sent = client.send_interrogation(CauseOfTransmission::Activation, 7, qoi);
             if sent {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         assert!(sent, "GI not sent");
-        wait_for(&is_term);
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done(&received.lock().unwrap()) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
         client.close();
+        std::mem::take(&mut *received.lock().unwrap())
+    }
 
-        let received = received.lock().unwrap().clone();
+    #[test]
+    fn gi_reply_sends_interrogated_values_before_act_term() {
+        use lib60870::types::{CauseOfTransmission, QOI_STATION};
+
+        let received = run_gi(QOI_STATION, |r| {
+            r.iter()
+                .any(|(_, cot, _)| *cot == Some(CauseOfTransmission::ActivationTermination))
+        });
         let term = received
             .iter()
-            .position(|(_, cot)| *cot == Some(CauseOfTransmission::ActivationTermination))
+            .position(|(_, cot, _)| *cot == Some(CauseOfTransmission::ActivationTermination))
             .expect("ACT_TERM received");
         let data: Vec<_> = received
             .iter()
             .enumerate()
-            .filter(|(_, (_, cot))| {
+            .filter(|(_, (_, cot, _))| {
                 *cot == Some(CauseOfTransmission::InterrogatedByStation)
                     || *cot == Some(CauseOfTransmission::Spontaneous)
             })
             .collect();
         assert_eq!(data.len(), 2, "{received:?}");
-        assert_eq!(received[0], (100, Some(CauseOfTransmission::ActivationCon)));
+        assert_eq!(
+            received[0],
+            (100, Some(CauseOfTransmission::ActivationCon), false)
+        );
         assert_eq!(received[term].0, 100, "{received:?}");
-        for (index, (_, cot)) in data {
+        for (index, (_, cot, _)) in data {
             assert!(index < term, "data after ACT_TERM: {received:?}");
             assert_eq!(*cot, Some(CauseOfTransmission::InterrogatedByStation));
         }
+    }
+
+    #[test]
+    fn group_interrogation_is_negatively_confirmed() {
+        use lib60870::types::CauseOfTransmission;
+
+        let received = run_gi(21, |r| !r.is_empty());
+        assert_eq!(
+            received,
+            vec![(100, Some(CauseOfTransmission::ActivationCon), true)]
+        );
     }
 }
