@@ -344,8 +344,8 @@ fn replay_cached_values(
 
         for point in store.values() {
             let ca = point.message.ca.unwrap_or(default_ca);
-            let msg = bridge::prepare_for_output(&point.message, point.received_at, now, policy);
-            bridge::dispatch(&bridge::LiveSink(&server), &msg, ca);
+            let out = bridge::prepare_for_output(&point.message, point.received_at, now, policy);
+            bridge::dispatch_outgoing(&bridge::LiveSink(&server), &out, ca);
         }
     }
 }
@@ -551,9 +551,9 @@ async fn handle_incoming_message(
     let dispatched = if gi_only {
         false
     } else {
-        let msg = bridge::prepare_for_output(&incoming.message, now, now, &policy);
+        let out = bridge::prepare_for_output(&incoming.message, now, now, &policy);
         let srv = server.lock().unwrap();
-        dispatch_message_if_enabled(&bridge::LiveSink(&srv), &msg, ca, gi_only)
+        dispatch_message_if_enabled(&bridge::LiveSink(&srv), &out, ca, gi_only)
     };
 
     incoming.ack().await.map_err(|e| {
@@ -569,7 +569,7 @@ async fn handle_incoming_message(
 
 fn dispatch_message_if_enabled<S: bridge::DataSink>(
     sink: &S,
-    message: &Iec104Message,
+    out: &bridge::Outgoing,
     ca: u16,
     gi_only: bool,
 ) -> bool {
@@ -577,7 +577,7 @@ fn dispatch_message_if_enabled<S: bridge::DataSink>(
         return false;
     }
 
-    bridge::dispatch(sink, message, ca);
+    bridge::dispatch_outgoing(sink, out, ca);
     true
 }
 
@@ -608,6 +608,13 @@ mod tests {
         }
     }
 
+    fn outgoing(message: Iec104Message) -> crate::bridge::Outgoing {
+        crate::bridge::Outgoing {
+            message,
+            not_topical: false,
+        }
+    }
+
     fn test_server() -> SharedServer {
         Arc::new(std::sync::Mutex::new(
             ServerBuilder::new()
@@ -621,7 +628,7 @@ mod tests {
     #[test]
     fn dispatch_message_if_enabled_skips_when_gi_only() {
         let sink = CapturingSink::default();
-        let dispatched = dispatch_message_if_enabled(&sink, &sample_message(), 7, true);
+        let dispatched = dispatch_message_if_enabled(&sink, &outgoing(sample_message()), 7, true);
 
         assert!(!dispatched);
         assert!(sink.calls.borrow().is_empty());
@@ -630,7 +637,7 @@ mod tests {
     #[test]
     fn dispatch_message_if_enabled_dispatches_when_spontaneous_enabled() {
         let sink = CapturingSink::default();
-        let dispatched = dispatch_message_if_enabled(&sink, &sample_message(), 7, false);
+        let dispatched = dispatch_message_if_enabled(&sink, &outgoing(sample_message()), 7, false);
 
         assert!(dispatched);
         assert!(matches!(

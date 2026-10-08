@@ -194,36 +194,53 @@ impl Default for OutputPolicy {
     }
 }
 
+/// A cached message shaped by the output policy, ready to dispatch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Outgoing {
+    pub message: Iec104Message,
+    /// Adds the NT bit to the message's own quality on the wire.
+    pub not_topical: bool,
+}
+
 /// Apply the output policy to a cached message just before it is sent.
 pub fn prepare_for_output(
     msg: &Iec104Message,
     received_at: time::OffsetDateTime,
     now: time::OffsetDateTime,
     policy: &OutputPolicy,
-) -> Iec104Message {
-    let mut out = msg.clone();
-    if let Some(max_age) = policy.max_age {
+) -> Outgoing {
+    let mut message = msg.clone();
+    let not_topical = policy.max_age.is_some_and(|max_age| {
         let older_than_limit = |t: time::OffsetDateTime| now - t > max_age;
         let stale = older_than_limit(received_at) || msg.timestamp.is_some_and(older_than_limit);
-        if stale && out.quality != QualityField::Invalid {
-            out.quality = QualityField::NotTopical;
-        }
-    }
+        stale && msg.quality != QualityField::Invalid
+    });
     if !policy.send_timestamps {
-        out.timestamp = None;
+        message.timestamp = None;
     }
-    out
+    Outgoing {
+        message,
+        not_topical,
+    }
 }
 
-/// Translate one [`Iec104Message`] into a [`DataSink`] call.
-///
-/// Generic over any `DataSink` so that the function can be exercised in unit
-/// tests without a real IEC-104 server.  In production, pass a [`LiveSink`].
-///
-/// The `default_ca` is used when the message does not include a `ca` field.
+/// Dispatch an [`Outgoing`] message, adding NT to its quality when stale.
+pub fn dispatch_outgoing<S: DataSink>(sink: &S, out: &Outgoing, default_ca: u16) {
+    let mut context = DispatchContext::from_message(&out.message, default_ca);
+    if out.not_topical {
+        context.quality |= Quality::NOT_TOPICAL;
+    }
+    dispatch_context(sink, &context, &out.message.value);
+}
+
+/// Translate one [`Iec104Message`] into a [`DataSink`] call, without the output policy.
+#[cfg(test)]
 pub fn dispatch<S: DataSink>(sink: &S, msg: &Iec104Message, default_ca: u16) {
     let context = DispatchContext::from_message(msg, default_ca);
+    dispatch_context(sink, &context, &msg.value);
+}
 
+fn dispatch_context<S: DataSink>(sink: &S, context: &DispatchContext, value: &DataValue) {
     debug!(
         ioa = context.ioa,
         ca = context.ca,
@@ -234,10 +251,10 @@ pub fn dispatch<S: DataSink>(sink: &S, msg: &Iec104Message, default_ca: u16) {
     );
 
     match context.data_type {
-        DataType::SinglePoint => dispatch_single_point(sink, &context, &msg.value),
-        DataType::Float | DataType::Normalized => dispatch_float_like(sink, &context, &msg.value),
-        DataType::Scaled => dispatch_scaled(sink, &context, &msg.value),
-        DataType::DoublePoint => dispatch_double_point(sink, &context, &msg.value),
+        DataType::SinglePoint => dispatch_single_point(sink, context, value),
+        DataType::Float | DataType::Normalized => dispatch_float_like(sink, context, value),
+        DataType::Scaled => dispatch_scaled(sink, context, value),
+        DataType::DoublePoint => dispatch_double_point(sink, context, value),
     }
 }
 
@@ -1125,12 +1142,22 @@ mod tests {
         msg
     }
 
+    fn wire_quality(out: &Outgoing) -> Quality {
+        let sink = CapturingSink::default();
+        dispatch_outgoing(&sink, out, 1);
+        let calls = sink.calls.borrow();
+        match calls[0] {
+            SentCall::MeasuredFloat { quality, .. } => quality,
+            _ => panic!("expected a float"),
+        }
+    }
+
     #[test]
     fn strips_timestamp_when_timestamps_disabled() {
         let out = prepare_for_output(&timed_float(100), at(100), at(100), &policy(false, None));
-        assert_eq!(out.timestamp, None);
+        assert_eq!(out.message.timestamp, None);
         let sink = CapturingSink::default();
-        dispatch(&sink, &out, 1);
+        dispatch_outgoing(&sink, &out, 1);
         assert!(matches!(
             sink.calls.borrow()[0],
             SentCall::MeasuredFloat { ioa: 100, .. }
@@ -1145,31 +1172,31 @@ mod tests {
             at(100),
             &OutputPolicy::default(),
         );
-        assert_eq!(out.timestamp, Some(at(100)));
+        assert_eq!(out.message.timestamp, Some(at(100)));
     }
 
     #[test]
     fn old_source_time_is_not_topical() {
         let out = prepare_for_output(&timed_float(0), at(100), at(100), &policy(false, Some(60)));
-        assert_eq!(out.quality, QualityField::NotTopical);
+        assert_eq!(wire_quality(&out), Quality::NOT_TOPICAL);
     }
 
     #[test]
     fn old_arrival_is_not_topical_even_for_future_timestamp() {
         let out = prepare_for_output(&timed_float(220), at(0), at(100), &policy(false, Some(60)));
-        assert_eq!(out.quality, QualityField::NotTopical);
+        assert_eq!(wire_quality(&out), Quality::NOT_TOPICAL);
     }
 
     #[test]
     fn future_timestamp_is_not_stale() {
         let out = prepare_for_output(&timed_float(160), at(99), at(100), &policy(false, Some(60)));
-        assert_eq!(out.quality, QualityField::Good);
+        assert_eq!(wire_quality(&out), Quality::GOOD);
     }
 
     #[test]
     fn fresh_point_keeps_quality() {
         let out = prepare_for_output(&timed_float(90), at(99), at(100), &policy(false, Some(60)));
-        assert_eq!(out.quality, QualityField::Good);
+        assert_eq!(wire_quality(&out), Quality::GOOD);
     }
 
     #[test]
@@ -1177,7 +1204,18 @@ mod tests {
         let mut msg = timed_float(0);
         msg.quality = QualityField::Invalid;
         let out = prepare_for_output(&msg, at(0), at(100), &policy(false, Some(60)));
-        assert_eq!(out.quality, QualityField::Invalid);
+        assert_eq!(wire_quality(&out), Quality::INVALID);
+    }
+
+    #[test]
+    fn stale_substituted_keeps_substituted_flag() {
+        let mut msg = timed_float(0);
+        msg.quality = QualityField::Substituted;
+        let out = prepare_for_output(&msg, at(0), at(100), &policy(false, Some(60)));
+        assert_eq!(
+            wire_quality(&out),
+            Quality::SUBSTITUTED | Quality::NOT_TOPICAL
+        );
     }
 
     #[test]
@@ -1188,6 +1226,6 @@ mod tests {
             at(100),
             &policy(true, Some(60)),
         );
-        assert_eq!(out.quality, QualityField::Good);
+        assert_eq!(wire_quality(&out), Quality::GOOD);
     }
 }
